@@ -18,7 +18,9 @@
 package org.apache.hadoop.hdds.scm.container.placement.algorithms;
 
 import com.google.common.annotations.VisibleForTesting;
-import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.hdds.conf.ConfigurationSource;
+import org.apache.hadoop.hdds.scm.PlacementPolicy;
+import org.apache.hadoop.hdds.scm.SCMCommonPlacementPolicy;
 import org.apache.hadoop.hdds.scm.exceptions.SCMException;
 import org.apache.hadoop.hdds.scm.net.NetworkTopology;
 import org.apache.hadoop.hdds.scm.node.NodeManager;
@@ -37,8 +39,8 @@ import java.util.List;
  * Balancer will need to support containers as a feature before this class
  * can be practically used.
  */
-public final class SCMContainerPlacementRandom extends SCMCommonPolicy
-    implements ContainerPlacementPolicy {
+public final class SCMContainerPlacementRandom extends SCMCommonPlacementPolicy
+    implements PlacementPolicy {
   @VisibleForTesting
   static final Logger LOG =
       LoggerFactory.getLogger(SCMContainerPlacementRandom.class);
@@ -50,7 +52,7 @@ public final class SCMContainerPlacementRandom extends SCMCommonPolicy
    * @param conf Config
    */
   public SCMContainerPlacementRandom(final NodeManager nodeManager,
-      final Configuration conf, final NetworkTopology networkTopology,
+      final ConfigurationSource conf, final NetworkTopology networkTopology,
       final boolean fallback, final SCMContainerPlacementMetrics metrics) {
     super(nodeManager, conf);
   }

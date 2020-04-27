@@ -34,8 +34,6 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import org.apache.commons.lang3.StringUtils;
-import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hdds.client.OzoneQuota;
 import org.apache.hadoop.hdds.client.ReplicationFactor;
 import org.apache.hadoop.hdds.client.ReplicationType;
@@ -69,6 +67,7 @@ import org.apache.hadoop.ozone.client.OzoneVolume;
 import org.apache.hadoop.ozone.client.VolumeArgs;
 import org.apache.hadoop.ozone.client.io.OzoneInputStream;
 import org.apache.hadoop.ozone.client.io.OzoneOutputStream;
+import org.apache.hadoop.ozone.client.protocol.ClientProtocol;
 import org.apache.hadoop.ozone.common.OzoneChecksumException;
 import org.apache.hadoop.ozone.container.common.helpers.BlockData;
 import org.apache.hadoop.ozone.container.common.interfaces.Container;
@@ -101,7 +100,7 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.lang3.RandomStringUtils;
 import org.apache.commons.lang3.RandomUtils;
-
+import org.apache.commons.lang3.StringUtils;
 import static org.apache.hadoop.hdds.client.ReplicationFactor.ONE;
 import static org.apache.hadoop.hdds.client.ReplicationType.STAND_ALONE;
 import static org.apache.hadoop.ozone.OzoneAcl.AclScope.ACCESS;
@@ -111,9 +110,7 @@ import static org.apache.hadoop.ozone.security.acl.IAccessAuthorizer.ACLIdentity
 import static org.apache.hadoop.ozone.security.acl.IAccessAuthorizer.ACLType.READ;
 import static org.hamcrest.CoreMatchers.containsString;
 import static org.hamcrest.CoreMatchers.either;
-
 import org.junit.Assert;
-
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
@@ -121,7 +118,6 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
-
 import org.junit.Ignore;
 import org.junit.Test;
 import org.slf4j.Logger;
@@ -165,6 +161,7 @@ public abstract class TestOzoneRpcClientAbstract {
   static void startCluster(OzoneConfiguration conf) throws Exception {
     cluster = MiniOzoneCluster.newBuilder(conf)
         .setNumDatanodes(3)
+        .setTotalPipelineNumLimit(10)
         .setScmId(scmId)
         .build();
     cluster.waitForClusterToBeReady();
@@ -241,6 +238,19 @@ public abstract class TestOzoneRpcClientAbstract {
   }
 
   @Test
+  public void testVolumeSetOwner() throws IOException {
+    String volumeName = UUID.randomUUID().toString();
+    store.createVolume(volumeName);
+
+    String ownerName = "someRandomUser1";
+
+    ClientProtocol proxy = store.getClientProxy();
+    proxy.setVolumeOwner(volumeName, ownerName);
+    // Set owner again
+    proxy.setVolumeOwner(volumeName, ownerName);
+  }
+
+  @Test
   public void testSetVolumeQuota()
       throws IOException {
     String volumeName = UUID.randomUUID().toString();
@@ -307,8 +317,8 @@ public abstract class TestOzoneRpcClientAbstract {
     volume.createBucket(bucketName);
     OzoneBucket bucket = volume.getBucket(bucketName);
     Assert.assertEquals(bucketName, bucket.getName());
-    Assert.assertTrue(bucket.getCreationTime().isAfter(testStartTime));
-    Assert.assertTrue(volume.getCreationTime().isAfter(testStartTime));
+    Assert.assertFalse(bucket.getCreationTime().isBefore(testStartTime));
+    Assert.assertFalse(volume.getCreationTime().isBefore(testStartTime));
   }
 
   @Test
@@ -322,8 +332,8 @@ public abstract class TestOzoneRpcClientAbstract {
     OzoneVolume volume = store.getVolume(volumeName);
     OzoneBucket bucket = volume.getBucket(bucketName);
     Assert.assertEquals(bucketName, bucket.getName());
-    Assert.assertTrue(bucket.getCreationTime().isAfter(testStartTime));
-    Assert.assertTrue(volume.getCreationTime().isAfter(testStartTime));
+    Assert.assertFalse(bucket.getCreationTime().isBefore(testStartTime));
+    Assert.assertFalse(volume.getCreationTime().isBefore(testStartTime));
   }
 
   @Test
@@ -331,7 +341,7 @@ public abstract class TestOzoneRpcClientAbstract {
     Instant testStartTime = Instant.now();
     String userName = "ozone/localhost@EXAMPLE.COM";
     String bucketName = UUID.randomUUID().toString();
-    String s3VolumeName = OzoneS3Util.getVolumeName(userName);
+    String s3VolumeName = OzoneS3Util.getS3Username(userName);
     store.createS3Bucket(s3VolumeName, bucketName);
     String volumeName = store.getOzoneVolumeName(bucketName);
     assertEquals(volumeName, "s3" + s3VolumeName);
@@ -339,8 +349,8 @@ public abstract class TestOzoneRpcClientAbstract {
     OzoneVolume volume = store.getVolume(volumeName);
     OzoneBucket bucket = volume.getBucket(bucketName);
     Assert.assertEquals(bucketName, bucket.getName());
-    Assert.assertTrue(bucket.getCreationTime().isAfter(testStartTime));
-    Assert.assertTrue(volume.getCreationTime().isAfter(testStartTime));
+    Assert.assertFalse(bucket.getCreationTime().isBefore(testStartTime));
+    Assert.assertFalse(volume.getCreationTime().isBefore(testStartTime));
   }
 
 
@@ -383,8 +393,8 @@ public abstract class TestOzoneRpcClientAbstract {
     OzoneVolume volume = store.getVolume(volumeName);
     OzoneBucket bucket = volume.getBucket(bucketName);
     Assert.assertEquals(bucketName, bucket.getName());
-    Assert.assertTrue(bucket.getCreationTime().isAfter(testStartTime));
-    Assert.assertTrue(volume.getCreationTime().isAfter(testStartTime));
+    Assert.assertFalse(bucket.getCreationTime().isBefore(testStartTime));
+    Assert.assertFalse(volume.getCreationTime().isBefore(testStartTime));
     store.deleteS3Bucket(bucketName);
 
     OzoneTestUtils.expectOmException(ResultCodes.S3_BUCKET_NOT_FOUND,
@@ -704,8 +714,8 @@ public abstract class TestOzoneRpcClientAbstract {
           keyName, STAND_ALONE,
           ONE));
       Assert.assertEquals(value, new String(fileContent));
-      Assert.assertTrue(key.getCreationTime().isAfter(testStartTime));
-      Assert.assertTrue(key.getModificationTime().isAfter(testStartTime));
+      Assert.assertFalse(key.getCreationTime().isBefore(testStartTime));
+      Assert.assertFalse(key.getModificationTime().isBefore(testStartTime));
     }
   }
 
@@ -771,8 +781,8 @@ public abstract class TestOzoneRpcClientAbstract {
       Assert.assertTrue(verifyRatisReplication(volumeName, bucketName,
           keyName, ReplicationType.RATIS, ONE));
       Assert.assertEquals(value, new String(fileContent));
-      Assert.assertTrue(key.getCreationTime().isAfter(testStartTime));
-      Assert.assertTrue(key.getModificationTime().isAfter(testStartTime));
+      Assert.assertFalse(key.getCreationTime().isBefore(testStartTime));
+      Assert.assertFalse(key.getModificationTime().isBefore(testStartTime));
     }
   }
 
@@ -806,8 +816,8 @@ public abstract class TestOzoneRpcClientAbstract {
           keyName, ReplicationType.RATIS,
           ReplicationFactor.THREE));
       Assert.assertEquals(value, new String(fileContent));
-      Assert.assertTrue(key.getCreationTime().isAfter(testStartTime));
-      Assert.assertTrue(key.getModificationTime().isAfter(testStartTime));
+      Assert.assertFalse(key.getCreationTime().isBefore(testStartTime));
+      Assert.assertFalse(key.getModificationTime().isBefore(testStartTime));
     }
   }
 
@@ -848,8 +858,8 @@ public abstract class TestOzoneRpcClientAbstract {
               keyName, ReplicationType.RATIS,
               ReplicationFactor.THREE));
           Assert.assertEquals(data, new String(fileContent));
-          Assert.assertTrue(key.getCreationTime().isAfter(testStartTime));
-          Assert.assertTrue(key.getModificationTime().isAfter(testStartTime));
+          Assert.assertFalse(key.getCreationTime().isBefore(testStartTime));
+          Assert.assertFalse(key.getModificationTime().isBefore(testStartTime));
         }
         latch.countDown();
       } catch (IOException ex) {
@@ -941,7 +951,7 @@ public abstract class TestOzoneRpcClientAbstract {
   private void readCorruptedKey(String volumeName, String bucketName,
       String keyName, boolean verifyChecksum) {
     try {
-      Configuration configuration = cluster.getConf();
+      OzoneConfiguration configuration = cluster.getConf();
       configuration.setBoolean(OzoneConfigKeys.OZONE_CLIENT_VERIFY_CHECKSUM,
           verifyChecksum);
       RpcClient client = new RpcClient(configuration, null);
@@ -1216,16 +1226,15 @@ public abstract class TestOzoneRpcClientAbstract {
       Assert.assertNotNull("Block not found", blockData);
 
       // Get the location of the chunk file
-      String chunkName = blockData.getChunks().get(0).getChunkName();
       String containreBaseDir =
           container.getContainerData().getVolume().getHddsRootDir().getPath();
       File chunksLocationPath = KeyValueContainerLocationUtil
           .getChunksLocationPath(containreBaseDir, scmId, containerID);
-      File chunkFile = new File(chunksLocationPath, chunkName);
-
-      // Corrupt the contents of the chunk file
-      String newData = new String("corrupted data");
-      FileUtils.writeByteArrayToFile(chunkFile, newData.getBytes());
+      byte[] corruptData = "corrupted data".getBytes();
+      // Corrupt the contents of chunk files
+      for (File file : FileUtils.listFiles(chunksLocationPath, null, false)) {
+        FileUtils.writeByteArrayToFile(file, corruptData);
+      }
     }
   }
 

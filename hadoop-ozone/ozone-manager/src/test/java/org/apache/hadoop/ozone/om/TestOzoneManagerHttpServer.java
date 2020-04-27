@@ -18,15 +18,23 @@
 
 package org.apache.hadoop.ozone.om;
 
-import org.apache.hadoop.conf.Configuration;
+import java.io.File;
+import java.net.InetSocketAddress;
+import java.net.URL;
+import java.net.URLConnection;
+import java.util.Arrays;
+import java.util.Collection;
+
 import org.apache.hadoop.fs.FileUtil;
-import org.apache.hadoop.hdfs.DFSConfigKeys;
+import org.apache.hadoop.hdds.conf.OzoneConfiguration;
 import org.apache.hadoop.hdfs.web.URLConnectionFactory;
 import org.apache.hadoop.http.HttpConfig;
 import org.apache.hadoop.http.HttpConfig.Policy;
 import org.apache.hadoop.net.NetUtils;
+import org.apache.hadoop.ozone.OzoneConfigKeys;
 import org.apache.hadoop.security.ssl.KeyStoreTestUtil;
 import org.apache.hadoop.test.GenericTestUtils;
+
 import org.junit.AfterClass;
 import org.junit.Assert;
 import org.junit.BeforeClass;
@@ -34,13 +42,6 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 import org.junit.runners.Parameterized.Parameters;
-
-import java.io.File;
-import java.net.InetSocketAddress;
-import java.net.URL;
-import java.net.URLConnection;
-import java.util.Arrays;
-import java.util.Collection;
 
 /**
  * Test http server of OM with various HTTP option.
@@ -51,7 +52,7 @@ public class TestOzoneManagerHttpServer {
       .getTempPath(TestOzoneManagerHttpServer.class.getSimpleName());
   private static String keystoresDir;
   private static String sslConfDir;
-  private static Configuration conf;
+  private static OzoneConfiguration conf;
   private static URLConnectionFactory connectionFactory;
 
   @Parameters public static Collection<Object[]> policy() {
@@ -73,16 +74,16 @@ public class TestOzoneManagerHttpServer {
     File base = new File(BASEDIR);
     FileUtil.fullyDelete(base);
     base.mkdirs();
-    conf = new Configuration();
+    conf = new OzoneConfiguration();
     keystoresDir = new File(BASEDIR).getAbsolutePath();
     sslConfDir = KeyStoreTestUtil.getClasspathDir(
         TestOzoneManagerHttpServer.class);
     KeyStoreTestUtil.setupSSLConfig(keystoresDir, sslConfDir, conf, false);
     connectionFactory =
         URLConnectionFactory.newDefaultURLConnectionFactory(conf);
-    conf.set(DFSConfigKeys.DFS_CLIENT_HTTPS_KEYSTORE_RESOURCE_KEY,
+    conf.set(OzoneConfigKeys.OZONE_CLIENT_HTTPS_KEYSTORE_RESOURCE_KEY,
         KeyStoreTestUtil.getClientSSLConfigFileName());
-    conf.set(DFSConfigKeys.DFS_SERVER_HTTPS_KEYSTORE_RESOURCE_KEY,
+    conf.set(OzoneConfigKeys.OZONE_SERVER_HTTPS_KEYSTORE_RESOURCE_KEY,
         KeyStoreTestUtil.getServerSSLConfigFileName());
   }
 
@@ -92,7 +93,7 @@ public class TestOzoneManagerHttpServer {
   }
 
   @Test public void testHttpPolicy() throws Exception {
-    conf.set(DFSConfigKeys.DFS_HTTP_POLICY_KEY, policy.name());
+    conf.set(OzoneConfigKeys.OZONE_HTTP_POLICY_KEY, policy.name());
     conf.set(OMConfigKeys.OZONE_OM_HTTP_ADDRESS_KEY, "localhost:0");
     conf.set(OMConfigKeys.OZONE_OM_HTTPS_ADDRESS_KEY, "localhost:0");
 

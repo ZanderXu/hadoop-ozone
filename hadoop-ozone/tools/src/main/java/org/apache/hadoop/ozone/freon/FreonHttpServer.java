@@ -19,15 +19,15 @@ package org.apache.hadoop.ozone.freon;
 
 import java.io.IOException;
 
-import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.hdds.server.BaseHttpServer;
+import org.apache.hadoop.hdds.conf.ConfigurationSource;
+import org.apache.hadoop.hdds.server.http.BaseHttpServer;
 import org.apache.hadoop.ozone.OzoneConfigKeys;
 
 /**
  * Http server to provide metrics + profile endpoint.
  */
 public class FreonHttpServer extends BaseHttpServer {
-  public FreonHttpServer(Configuration conf) throws IOException {
+  public FreonHttpServer(ConfigurationSource conf) throws IOException {
     super(conf, "freon");
   }
 

@@ -24,6 +24,7 @@ import org.apache.hadoop.hdds.security.x509.certificate.client.CertificateClient
 import org.apache.hadoop.hdds.security.x509.certificate.client.OMCertificateClient;
 import org.apache.hadoop.hdds.server.ServerUtils;
 import org.apache.hadoop.io.Text;
+import org.apache.hadoop.ozone.OzoneConsts;
 import org.apache.hadoop.ozone.om.OMMetadataManager;
 import org.apache.hadoop.ozone.om.OmMetadataManagerImpl;
 import org.apache.hadoop.ozone.om.S3SecretManager;
@@ -52,7 +53,7 @@ import java.security.cert.X509Certificate;
 import java.util.HashMap;
 import java.util.Map;
 
-import static org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.OMTokenProto.Type.S3TOKEN;
+import static org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.OMTokenProto.Type.S3AUTHINFO;
 
 
 /**
@@ -319,13 +320,13 @@ public class TestOzoneDelegationTokenSecretManager {
   }
 
   @Test
-  public void testValidateS3TOKENSuccess() throws Exception {
+  public void testValidateS3AUTHINFOSuccess() throws Exception {
     secretManager = createSecretManager(conf, tokenMaxLifetime,
         expiryTime, tokenRemoverScanInterval);
     secretManager.start(certificateClient);
 
     OzoneTokenIdentifier identifier = new OzoneTokenIdentifier();
-    identifier.setTokenType(S3TOKEN);
+    identifier.setTokenType(S3AUTHINFO);
     identifier.setSignature("56ec73ba1974f8feda8365c3caef89c5d4a688d" +
         "5f9baccf4765f46a14cd745ad");
     identifier.setStrToSign("AWS4-HMAC-SHA256\n" +
@@ -337,13 +338,13 @@ public class TestOzoneDelegationTokenSecretManager {
   }
 
   @Test
-  public void testValidateS3TOKENFailure() throws Exception {
+  public void testValidateS3AUTHINFOFailure() throws Exception {
     secretManager = createSecretManager(conf, tokenMaxLifetime,
         expiryTime, tokenRemoverScanInterval);
     secretManager.start(certificateClient);
 
     OzoneTokenIdentifier identifier = new OzoneTokenIdentifier();
-    identifier.setTokenType(S3TOKEN);
+    identifier.setTokenType(S3AUTHINFO);
     identifier.setSignature("56ec73ba1974f8feda8365c3caef89c5d4a688d" +
         "5f9baccf4765f46a14cd745ad");
     identifier.setStrToSign("AWS4-HMAC-SHA256\n" +
@@ -396,8 +397,15 @@ public class TestOzoneDelegationTokenSecretManager {
   private OzoneDelegationTokenSecretManager
       createSecretManager(OzoneConfiguration config, long tokenMaxLife,
       long expiry, long tokenRemoverScanTime) throws IOException {
-    return new OzoneDelegationTokenSecretManager(config, tokenMaxLife,
-        expiry, tokenRemoverScanTime, serviceRpcAdd, s3SecretManager,
-        certificateClient);
+    return new OzoneDelegationTokenSecretManager.Builder()
+        .setConf(config)
+        .setTokenMaxLifetime(tokenMaxLife)
+        .setTokenRenewInterval(expiry)
+        .setTokenRemoverScanInterval(tokenRemoverScanTime)
+        .setService(serviceRpcAdd)
+        .setS3SecretManager(s3SecretManager)
+        .setCertificateClient(certificateClient)
+        .setOmServiceId(OzoneConsts.OM_SERVICE_ID_DEFAULT)
+        .build();
   }
 }

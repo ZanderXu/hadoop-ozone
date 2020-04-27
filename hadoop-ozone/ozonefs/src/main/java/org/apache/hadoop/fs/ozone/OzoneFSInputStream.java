@@ -23,8 +23,8 @@ import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.ReadOnlyBufferException;
 
-import org.apache.hadoop.classification.InterfaceAudience;
-import org.apache.hadoop.classification.InterfaceStability;
+import org.apache.hadoop.hdds.annotation.InterfaceAudience;
+import org.apache.hadoop.hdds.annotation.InterfaceStability;
 import org.apache.hadoop.fs.ByteBufferReadable;
 import org.apache.hadoop.fs.FSInputStream;
 import org.apache.hadoop.fs.FileSystem.Statistics;
@@ -38,7 +38,7 @@ import org.apache.hadoop.fs.Seekable;
  */
 @InterfaceAudience.Private
 @InterfaceStability.Evolving
-public final class OzoneFSInputStream extends FSInputStream
+public class OzoneFSInputStream extends FSInputStream
     implements ByteBufferReadable {
 
   private final InputStream inputStream;
@@ -104,12 +104,22 @@ public final class OzoneFSInputStream extends FSInputStream
       throw new ReadOnlyBufferException();
     }
 
-    int bufInitPos = buf.position();
     int readLen = Math.min(buf.remaining(), available());
 
-    byte[] readData = new byte[readLen];
-    int bytesRead = read(readData, bufInitPos, readLen);
-    buf.put(readData);
+    int bytesRead;
+    if (buf.hasArray()) {
+      int pos = buf.position();
+      bytesRead = read(buf.array(), pos, readLen);
+      if (bytesRead > 0) {
+        buf.position(pos + bytesRead);
+      }
+    } else {
+      byte[] readData = new byte[readLen];
+      bytesRead = read(readData, 0, readLen);
+      if (bytesRead > 0) {
+        buf.put(readData);
+      }
+    }
 
     return bytesRead;
   }

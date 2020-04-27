@@ -16,7 +16,7 @@
  */
 package org.apache.hadoop.ozone.container.common.statemachine;
 
-import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.hdds.conf.ConfigurationSource;
 import org.apache.hadoop.ozone.protocol.VersionResponse;
 import org.apache.hadoop.ozone.protocolPB
     .StorageContainerDatanodeProtocolClientSideTranslatorPB;
@@ -32,8 +32,8 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 
-import static org.apache.hadoop.hdds.scm.HddsServerUtil.getLogWarnInterval;
-import static org.apache.hadoop.hdds.scm.HddsServerUtil.getScmHeartbeatInterval;
+import static org.apache.hadoop.hdds.utils.HddsServerUtil.getLogWarnInterval;
+import static org.apache.hadoop.hdds.utils.HddsServerUtil.getScmHeartbeatInterval;
 
 /**
  * Endpoint is used as holder class that keeps state around the RPC endpoint.
@@ -46,10 +46,11 @@ public class EndpointStateMachine
   private final AtomicLong missedCount;
   private final InetSocketAddress address;
   private final Lock lock;
-  private final Configuration conf;
+  private final ConfigurationSource conf;
   private EndPointStates state;
   private VersionResponse version;
   private ZonedDateTime lastSuccessfulHeartbeat;
+  private boolean isPassive;
 
   /**
    * Constructs RPC Endpoints.
@@ -58,7 +59,7 @@ public class EndpointStateMachine
    */
   public EndpointStateMachine(InetSocketAddress address,
       StorageContainerDatanodeProtocolClientSideTranslatorPB endPoint,
-      Configuration conf) {
+      ConfigurationSource conf) {
     this.endPoint = endPoint;
     this.missedCount = new AtomicLong(0);
     this.address = address;
@@ -200,17 +201,44 @@ public class EndpointStateMachine
    *  @param ex         - Exception
    */
   public void logIfNeeded(Exception ex) {
-    if (this.getMissedCount() % getLogWarnInterval(conf) == 0) {
-      LOG.error(
-          "Unable to communicate to SCM server at {} for past {} seconds.",
-          this.getAddress().getHostString() + ":" + this.getAddress().getPort(),
-          TimeUnit.MILLISECONDS.toSeconds(
-              this.getMissedCount() * getScmHeartbeatInterval(this.conf)), ex);
+
+    double missCounter =
+        this.getMissedCount() % getLogWarnInterval(conf);
+    String serverName = "SCM";
+
+    if (isPassive) {
+      // Recon connection failures can be logged 10 times lower than regular
+      // SCM.
+      missCounter = this.getMissedCount() % (10 * getLogWarnInterval(conf));
+      serverName = "Recon";
     }
+
+    if (missCounter == 0) {
+      LOG.warn(
+          "Unable to communicate to {} server at {} for past {} seconds.",
+          serverName,
+          getAddress().getHostString() + ":" + getAddress().getPort(),
+          TimeUnit.MILLISECONDS.toSeconds(this.getMissedCount() *
+                  getScmHeartbeatInterval(this.conf)), ex);
+    }
+
     if (LOG.isTraceEnabled()) {
       LOG.trace("Incrementing the Missed count.", ex);
     }
     this.incMissed();
+  }
+
+  /**
+   * Returns true if the end point is not an SCM. A passive endpoint can be a
+   * Server that only reads information from Datanode, like Recon.
+   * @return true/false.
+   */
+  public boolean isPassive() {
+    return isPassive;
+  }
+
+  public void setPassive(boolean passive) {
+    isPassive = passive;
   }
 
 

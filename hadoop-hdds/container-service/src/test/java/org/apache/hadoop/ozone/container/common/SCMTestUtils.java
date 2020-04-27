@@ -23,15 +23,19 @@ import java.net.ServerSocket;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hdds.HddsConfigKeys;
+import org.apache.hadoop.hdds.conf.ConfigurationSource;
 import org.apache.hadoop.hdds.conf.OzoneConfiguration;
+import org.apache.hadoop.hdds.fs.MockSpaceUsageCheckFactory;
+import org.apache.hadoop.hdds.fs.SpaceUsageCheckFactory;
 import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
 import org.apache.hadoop.hdds.protocol.proto.StorageContainerDatanodeProtocolProtos.StorageContainerDatanodeProtocolService;
 import org.apache.hadoop.hdds.scm.ScmConfigKeys;
+import org.apache.hadoop.hdds.utils.LegacyHadoopConfigurationSource;
+import org.apache.hadoop.hdds.utils.ProtocolMessageMetrics;
 import org.apache.hadoop.hdfs.DFSUtil;
 import org.apache.hadoop.ipc.ProtobufRpcEngine;
 import org.apache.hadoop.ipc.RPC;
 import org.apache.hadoop.ozone.protocol.StorageContainerDatanodeProtocol;
-import org.apache.hadoop.ozone.protocolPB.ProtocolMessageMetrics;
 import org.apache.hadoop.ozone.protocolPB.StorageContainerDatanodeProtocolPB;
 import org.apache.hadoop.ozone.protocolPB.StorageContainerDatanodeProtocolServerSideTranslatorPB;
 import org.apache.hadoop.test.GenericTestUtils;
@@ -83,11 +87,14 @@ public final class SCMTestUtils {
   /**
    * Start Datanode RPC server.
    */
-  public static RPC.Server startScmRpcServer(Configuration configuration,
+  public static RPC.Server startScmRpcServer(ConfigurationSource configuration,
       StorageContainerDatanodeProtocol server,
       InetSocketAddress rpcServerAddresss, int handlerCount) throws
       IOException {
-    RPC.setProtocolEngine(configuration,
+
+    Configuration hadoopConfig =
+        LegacyHadoopConfigurationSource.asHadoopConfiguration(configuration);
+    RPC.setProtocolEngine(hadoopConfig,
         StorageContainerDatanodeProtocolPB.class,
         ProtobufRpcEngine.class);
 
@@ -97,7 +104,7 @@ public final class SCMTestUtils {
                 new StorageContainerDatanodeProtocolServerSideTranslatorPB(
                     server, Mockito.mock(ProtocolMessageMetrics.class)));
 
-    RPC.Server scmServer = startRpcServer(configuration, rpcServerAddresss,
+    RPC.Server scmServer = startRpcServer(hadoopConfig, rpcServerAddresss,
         StorageContainerDatanodeProtocolPB.class, scmDatanodeService,
         handlerCount);
 
@@ -120,6 +127,9 @@ public final class SCMTestUtils {
         .getRandomizedTempPath());
     conf.set(HddsConfigKeys.OZONE_METADATA_DIRS, GenericTestUtils
         .getRandomizedTempPath());
+    conf.setClass(SpaceUsageCheckFactory.Conf.configKeyForClassName(),
+        MockSpaceUsageCheckFactory.None.class,
+        SpaceUsageCheckFactory.class);
     return conf;
   }
 
@@ -128,20 +138,20 @@ public final class SCMTestUtils {
   }
 
   public static HddsProtos.ReplicationType getReplicationType(
-      Configuration conf) {
+      ConfigurationSource conf) {
     return isUseRatis(conf) ?
         HddsProtos.ReplicationType.RATIS :
         HddsProtos.ReplicationType.STAND_ALONE;
   }
 
   public static HddsProtos.ReplicationFactor getReplicationFactor(
-      Configuration conf) {
+      ConfigurationSource conf) {
     return isUseRatis(conf) ?
         HddsProtos.ReplicationFactor.THREE :
         HddsProtos.ReplicationFactor.ONE;
   }
 
-  private static boolean isUseRatis(Configuration c) {
+  private static boolean isUseRatis(ConfigurationSource c) {
     return c.getBoolean(
         ScmConfigKeys.DFS_CONTAINER_RATIS_ENABLED_KEY,
         ScmConfigKeys.DFS_CONTAINER_RATIS_ENABLED_DEFAULT);

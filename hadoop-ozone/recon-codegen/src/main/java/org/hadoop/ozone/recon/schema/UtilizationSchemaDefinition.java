@@ -22,6 +22,7 @@ import java.sql.SQLException;
 
 import javax.sql.DataSource;
 
+import com.google.inject.Singleton;
 import org.jooq.impl.DSL;
 import org.jooq.impl.SQLDataType;
 import org.springframework.transaction.annotation.Transactional;
@@ -31,6 +32,7 @@ import com.google.inject.Inject;
 /**
  * Programmatic definition of Recon DDL.
  */
+@Singleton
 public class UtilizationSchemaDefinition implements ReconSchemaDefinition {
 
   private final DataSource dataSource;
@@ -54,7 +56,7 @@ public class UtilizationSchemaDefinition implements ReconSchemaDefinition {
     createFileSizeCount(conn);
   }
 
-  void createClusterGrowthTable(Connection conn) {
+  private void createClusterGrowthTable(Connection conn) {
     DSL.using(conn).createTableIfNotExists(CLUSTER_GROWTH_DAILY_TABLE_NAME)
         .column("timestamp", SQLDataType.TIMESTAMP)
         .column("datanode_id", SQLDataType.INTEGER)
@@ -69,7 +71,7 @@ public class UtilizationSchemaDefinition implements ReconSchemaDefinition {
         .execute();
   }
 
-  void createFileSizeCount(Connection conn) {
+  private void createFileSizeCount(Connection conn) {
     DSL.using(conn).createTableIfNotExists(FILE_COUNT_BY_SIZE_TABLE_NAME)
         .column("file_size", SQLDataType.BIGINT)
         .column("count", SQLDataType.BIGINT)

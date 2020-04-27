@@ -24,10 +24,11 @@ import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
 import com.google.common.cache.RemovalListener;
 import com.google.common.cache.RemovalNotification;
-import org.apache.hadoop.conf.Configuration;
+
 import org.apache.hadoop.hdds.conf.Config;
 import org.apache.hadoop.hdds.conf.ConfigGroup;
 import org.apache.hadoop.hdds.conf.ConfigType;
+import org.apache.hadoop.hdds.conf.ConfigurationSource;
 import org.apache.hadoop.hdds.conf.OzoneConfiguration;
 import org.apache.hadoop.hdds.scm.pipeline.Pipeline;
 import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
@@ -69,7 +70,7 @@ public class XceiverClientManager implements Closeable {
   private static final Logger LOG =
       LoggerFactory.getLogger(XceiverClientManager.class);
   //TODO : change this to SCM configuration class
-  private final Configuration conf;
+  private final ConfigurationSource conf;
   private final Cache<String, XceiverClientSpi> clientCache;
   private X509Certificate caCert;
 
@@ -83,12 +84,13 @@ public class XceiverClientManager implements Closeable {
    *
    * @param conf configuration
    */
-  public XceiverClientManager(Configuration conf) throws IOException {
+  public XceiverClientManager(ConfigurationSource conf) throws IOException {
     this(conf, OzoneConfiguration.of(conf).getObject(ScmClientConfig.class),
         null);
   }
 
-  public XceiverClientManager(Configuration conf, ScmClientConfig clientConf,
+  public XceiverClientManager(ConfigurationSource conf,
+      ScmClientConfig clientConf,
       String caCertPem) throws IOException {
     Preconditions.checkNotNull(clientConf);
     Preconditions.checkNotNull(conf);
@@ -297,58 +299,45 @@ public class XceiverClientManager implements Closeable {
   @ConfigGroup(prefix = "scm.container.client")
   public static class ScmClientConfig {
 
+    @Config(key = "max.size",
+        defaultValue = "256",
+        tags = {OZONE, PERFORMANCE},
+        description =
+            "Controls the maximum number of connections that are cached via"
+                + " client connection pooling. If the number of connections"
+                + " exceed this count, then the oldest idle connection is "
+                + "evicted."
+    )
     private int maxSize;
+
+    @Config(key = "idle.threshold",
+        type = ConfigType.TIME, timeUnit = MILLISECONDS,
+        defaultValue = "10s",
+        tags = {OZONE, PERFORMANCE},
+        description =
+            "In the standalone pipelines, the SCM clients use netty to "
+                + " communicate with the container. It also uses connection "
+                + "pooling"
+                + " to reduce client side overheads. This allows a connection"
+                + " to"
+                + " stay idle for a while before the connection is closed."
+    )
     private long staleThreshold;
-    private int maxOutstandingRequests;
 
     public long getStaleThreshold(TimeUnit unit) {
       return unit.convert(staleThreshold, MILLISECONDS);
     }
 
-    @Config(key = "idle.threshold",
-        type = ConfigType.TIME, timeUnit = MILLISECONDS,
-        defaultValue = "10s",
-        tags = { OZONE, PERFORMANCE },
-        description =
-            "In the standalone pipelines, the SCM clients use netty to "
-            + " communicate with the container. It also uses connection pooling"
-            + " to reduce client side overheads. This allows a connection to"
-            + " stay idle for a while before the connection is closed."
-    )
-    public void setStaleThreshold(long staleThreshold) {
-      this.staleThreshold = staleThreshold;
-    }
 
     public int getMaxSize() {
       return maxSize;
     }
 
-    @Config(key = "max.size",
-        defaultValue = "256",
-        tags = { OZONE, PERFORMANCE },
-        description =
-            "Controls the maximum number of connections that are cached via"
-            + " client connection pooling. If the number of connections"
-            + " exceed this count, then the oldest idle connection is evicted."
-    )
+    @VisibleForTesting
     public void setMaxSize(int maxSize) {
       this.maxSize = maxSize;
     }
 
-    public int getMaxOutstandingRequests() {
-      return maxOutstandingRequests;
-    }
-
-    @Config(key = "max.outstanding.requests",
-        defaultValue = "100",
-        tags = { OZONE, PERFORMANCE },
-        description =
-            "Controls the maximum number of outstanding async requests that can"
-            + " be handled by the Standalone as well as Ratis client."
-    )
-    public void setMaxOutstandingRequests(int maxOutstandingRequests) {
-      this.maxOutstandingRequests = maxOutstandingRequests;
-    }
   }
 
 }

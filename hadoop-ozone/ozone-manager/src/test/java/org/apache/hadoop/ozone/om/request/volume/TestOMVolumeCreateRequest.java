@@ -20,8 +20,11 @@ package org.apache.hadoop.ozone.om.request.volume;
 
 import java.util.UUID;
 
+import org.apache.hadoop.ozone.om.exceptions.OMException;
+import org.apache.hadoop.ozone.om.request.file.OMFileRequest;
 import org.apache.hadoop.ozone.om.response.volume.OMVolumeCreateResponse;
 import org.apache.hadoop.test.GenericTestUtils;
+import org.apache.hadoop.test.LambdaTestUtils;
 import org.junit.Assert;
 import org.junit.Test;
 
@@ -48,6 +51,9 @@ public class TestOMVolumeCreateRequest extends TestOMVolumeRequest {
     String adminName = UUID.randomUUID().toString();
     String ownerName = UUID.randomUUID().toString();
     doPreExecute(volumeName, adminName, ownerName);
+    // Verify exception thrown on invalid volume name
+    LambdaTestUtils.intercept(OMException.class, "Invalid volume name: v1",
+        () -> doPreExecute("v1", adminName, ownerName));
   }
 
   @Test
@@ -57,6 +63,8 @@ public class TestOMVolumeCreateRequest extends TestOMVolumeRequest {
     String volumeName = UUID.randomUUID().toString();
     String adminName = "user1";
     String ownerName = "user1";
+    long txLogIndex = 1;
+    long expectedObjId = OMFileRequest.getObjIDFromTxId(txLogIndex);
 
     OMRequest originalRequest = createVolumeRequest(volumeName, adminName,
         ownerName);
@@ -68,13 +76,14 @@ public class TestOMVolumeCreateRequest extends TestOMVolumeRequest {
 
     try {
       OMClientResponse omClientResponse =
-          omVolumeCreateRequest.validateAndUpdateCache(ozoneManager, 1,
-              ozoneManagerDoubleBufferHelper);
+          omVolumeCreateRequest.validateAndUpdateCache(ozoneManager,
+              txLogIndex, ozoneManagerDoubleBufferHelper);
       Assert.assertTrue(omClientResponse instanceof OMVolumeCreateResponse);
       OMVolumeCreateResponse respone =
           (OMVolumeCreateResponse) omClientResponse;
-      Assert.assertEquals(1, respone.getOmVolumeArgs().getObjectID());
-      Assert.assertEquals(1, respone.getOmVolumeArgs().getUpdateID());
+      Assert.assertEquals(expectedObjId, respone.getOmVolumeArgs()
+          .getObjectID());
+      Assert.assertEquals(txLogIndex, respone.getOmVolumeArgs().getUpdateID());
     } catch (IllegalArgumentException ex){
       GenericTestUtils.assertExceptionContains("should be greater than zero",
           ex);
@@ -105,9 +114,11 @@ public class TestOMVolumeCreateRequest extends TestOMVolumeRequest {
     Assert.assertNull(omMetadataManager.getUserTable().get(ownerKey));
 
     omVolumeCreateRequest = new OMVolumeCreateRequest(modifiedRequest);
+    long txLogIndex = 2;
+    long expectedObjId = OMFileRequest.getObjIDFromTxId(txLogIndex);
 
     OMClientResponse omClientResponse =
-        omVolumeCreateRequest.validateAndUpdateCache(ozoneManager, 2,
+        omVolumeCreateRequest.validateAndUpdateCache(ozoneManager, txLogIndex,
             ozoneManagerDoubleBufferHelper);
 
     OzoneManagerProtocolProtos.OMResponse omResponse =
@@ -125,8 +136,8 @@ public class TestOMVolumeCreateRequest extends TestOMVolumeRequest {
         omMetadataManager.getVolumeTable().get(volumeKey);
     // As request is valid volume table should not have entry.
     Assert.assertNotNull(omVolumeArgs);
-    Assert.assertEquals(2, omVolumeArgs.getObjectID());
-    Assert.assertEquals(2, omVolumeArgs.getUpdateID());
+    Assert.assertEquals(expectedObjId, omVolumeArgs.getObjectID());
+    Assert.assertEquals(txLogIndex, omVolumeArgs.getUpdateID());
 
     // Check data from table and request.
     Assert.assertEquals(volumeInfo.getVolume(), omVolumeArgs.getVolume());

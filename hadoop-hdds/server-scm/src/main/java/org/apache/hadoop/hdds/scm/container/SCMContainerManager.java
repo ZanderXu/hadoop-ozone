@@ -16,29 +16,6 @@
  */
 package org.apache.hadoop.hdds.scm.container;
 
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Preconditions;
-import com.google.common.primitives.Longs;
-import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.hdds.protocol.proto.HddsProtos.ContainerInfoProto;
-import org.apache.hadoop.hdds.protocol.proto.HddsProtos.LifeCycleState;
-import org.apache.hadoop.hdds.scm.ScmConfigKeys;
-import org.apache.hadoop.hdds.scm.container.metrics.SCMContainerManagerMetrics;
-import org.apache.hadoop.hdds.scm.exceptions.SCMException;
-import org.apache.hadoop.hdds.scm.pipeline.Pipeline;
-import org.apache.hadoop.hdds.scm.pipeline.PipelineManager;
-import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
-import org.apache.hadoop.hdds.protocol.proto.HddsProtos.ReplicationFactor;
-import org.apache.hadoop.hdds.protocol.proto.HddsProtos.ReplicationType;
-import org.apache.hadoop.hdds.server.ServerUtils;
-import org.apache.hadoop.ozone.OzoneConsts;
-import org.apache.hadoop.hdds.utils.BatchOperation;
-import org.apache.hadoop.hdds.utils.MetadataStore;
-import org.apache.hadoop.hdds.utils.MetadataStoreBuilder;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -52,9 +29,26 @@ import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.Collectors;
 
-import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_DB_CACHE_SIZE_DEFAULT;
-import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_DB_CACHE_SIZE_MB;
-import static org.apache.hadoop.ozone.OzoneConsts.SCM_CONTAINER_DB;
+import org.apache.hadoop.hdds.conf.ConfigurationSource;
+import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
+import org.apache.hadoop.hdds.protocol.proto.HddsProtos.LifeCycleState;
+import org.apache.hadoop.hdds.protocol.proto.HddsProtos.ReplicationFactor;
+import org.apache.hadoop.hdds.protocol.proto.HddsProtos.ReplicationType;
+import org.apache.hadoop.hdds.scm.ScmConfigKeys;
+import org.apache.hadoop.hdds.scm.container.metrics.SCMContainerManagerMetrics;
+import org.apache.hadoop.hdds.scm.exceptions.SCMException;
+import org.apache.hadoop.hdds.scm.pipeline.Pipeline;
+import org.apache.hadoop.hdds.scm.pipeline.PipelineManager;
+import org.apache.hadoop.hdds.scm.pipeline.PipelineNotFoundException;
+import org.apache.hadoop.hdds.utils.db.BatchOperationHandler;
+import org.apache.hadoop.hdds.utils.db.Table;
+import org.apache.hadoop.hdds.utils.db.Table.KeyValue;
+import org.apache.hadoop.hdds.utils.db.TableIterator;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * ContainerManager class contains the mapping from a name to a pipeline
@@ -66,38 +60,40 @@ public class SCMContainerManager implements ContainerManager {
       SCMContainerManager.class);
 
   private final Lock lock;
-  private final MetadataStore containerStore;
+
   private final PipelineManager pipelineManager;
+
   private final ContainerStateManager containerStateManager;
+
   private final int numContainerPerOwnerInPipeline;
 
   private final SCMContainerManagerMetrics scmContainerManagerMetrics;
 
+  private Table<ContainerID, ContainerInfo> containerStore;
+
+  private BatchOperationHandler batchHandler;
+
   /**
    * Constructs a mapping class that creates mapping between container names
    * and pipelines.
-   *
+   * <p>
    * passed to LevelDB and this memory is allocated in Native code space.
    * CacheSize is specified
    * in MB.
-   * @param conf - {@link Configuration}
+   *
+   * @param conf            - {@link ConfigurationSource}
    * @param pipelineManager - {@link PipelineManager}
    * @throws IOException on Failure.
    */
-  public SCMContainerManager(final Configuration conf,
-      PipelineManager pipelineManager) throws IOException {
+  public SCMContainerManager(
+      final ConfigurationSource conf,
+      Table<ContainerID, ContainerInfo> containerStore,
+      BatchOperationHandler batchHandler,
+      PipelineManager pipelineManager)
+      throws IOException {
 
-    final File metaDir = ServerUtils.getScmDbDir(conf);
-    final File containerDBPath = new File(metaDir, SCM_CONTAINER_DB);
-    final int cacheSize = conf.getInt(OZONE_SCM_DB_CACHE_SIZE_MB,
-        OZONE_SCM_DB_CACHE_SIZE_DEFAULT);
-
-    this.containerStore = MetadataStoreBuilder.newBuilder()
-        .setConf(conf)
-        .setDbFile(containerDBPath)
-        .setCacheSize(cacheSize * OzoneConsts.MB)
-        .build();
-
+    this.batchHandler = batchHandler;
+    this.containerStore = containerStore;
     this.lock = new ReentrantLock();
     this.pipelineManager = pipelineManager;
     this.containerStateManager = new ContainerStateManager(conf);
@@ -111,16 +107,25 @@ public class SCMContainerManager implements ContainerManager {
   }
 
   private void loadExistingContainers() throws IOException {
-    List<Map.Entry<byte[], byte[]>> range = containerStore
-        .getSequentialRangeKVs(null, Integer.MAX_VALUE, null);
-    for (Map.Entry<byte[], byte[]> entry : range) {
-      ContainerInfo container = ContainerInfo.fromProtobuf(
-          ContainerInfoProto.PARSER.parseFrom(entry.getValue()));
+
+    TableIterator<ContainerID, ? extends KeyValue<ContainerID, ContainerInfo>>
+        iterator = containerStore.iterator();
+
+    while (iterator.hasNext()) {
+      ContainerInfo container = iterator.next().getValue();
       Preconditions.checkNotNull(container);
       containerStateManager.loadContainer(container);
-      if (container.getState() == LifeCycleState.OPEN) {
-        pipelineManager.addContainerToPipeline(container.getPipelineID(),
-            ContainerID.valueof(container.getContainerID()));
+      try {
+        if (container.getState() == LifeCycleState.OPEN) {
+          pipelineManager.addContainerToPipeline(container.getPipelineID(),
+              ContainerID.valueof(container.getContainerID()));
+        }
+      } catch (PipelineNotFoundException ex) {
+        LOG.warn("Found a Container {} which is in {} state with pipeline {} " +
+                "that does not exist. Closing Container.", container,
+            container.getState(), container.getPipelineID());
+        updateContainerState(container.containerID(),
+            HddsProtos.LifeCycleEvent.FINALIZE, true);
       }
     }
   }
@@ -193,6 +198,18 @@ public class SCMContainerManager implements ContainerManager {
   public ContainerInfo getContainer(final ContainerID containerID)
       throws ContainerNotFoundException {
     return containerStateManager.getContainer(containerID);
+  }
+
+  @Override
+  public boolean exists(ContainerID containerID) {
+    lock.lock();
+    try {
+      return (containerStateManager.getContainer(containerID) != null);
+    } catch (ContainerNotFoundException e) {
+      return false;
+    } finally {
+      lock.unlock();
+    }
   }
 
   /**
@@ -283,10 +300,8 @@ public class SCMContainerManager implements ContainerManager {
     lock.lock();
     try {
       containerStateManager.removeContainer(containerID);
-      final byte[] dbKey = Longs.toByteArray(containerID.getId());
-      final byte[] containerBytes = containerStore.get(dbKey);
-      if (containerBytes != null) {
-        containerStore.delete(dbKey);
+      if (containerStore.get(containerID) != null) {
+        containerStore.delete(containerID);
       } else {
         // Where did the container go? o_O
         LOG.warn("Unable to remove the container {} from container store," +
@@ -312,6 +327,15 @@ public class SCMContainerManager implements ContainerManager {
       ContainerID containerID, HddsProtos.LifeCycleEvent event)
       throws IOException {
     // Should we return the updated ContainerInfo instead of LifeCycleState?
+    return updateContainerState(containerID, event, false);
+  }
+
+
+  private HddsProtos.LifeCycleState updateContainerState(
+      ContainerID containerID, HddsProtos.LifeCycleEvent event,
+      boolean skipPipelineToContainerRemove)
+      throws IOException {
+    // Should we return the updated ContainerInfo instead of LifeCycleState?
     lock.lock();
     try {
       final ContainerInfo container = containerStateManager
@@ -320,13 +344,15 @@ public class SCMContainerManager implements ContainerManager {
       containerStateManager.updateContainerState(containerID, event);
       final LifeCycleState newState = container.getState();
 
-      if (oldState == LifeCycleState.OPEN && newState != LifeCycleState.OPEN) {
-        pipelineManager
-            .removeContainerFromPipeline(container.getPipelineID(),
-                containerID);
+      if (!skipPipelineToContainerRemove) {
+        if (oldState == LifeCycleState.OPEN &&
+            newState != LifeCycleState.OPEN) {
+          pipelineManager
+              .removeContainerFromPipeline(container.getPipelineID(),
+                  containerID);
+        }
       }
-      final byte[] dbKey = Longs.toByteArray(containerID.getId());
-      containerStore.put(dbKey, container.getProtobuf().toByteArray());
+      containerStore.put(containerID, container);
       return newState;
     } catch (ContainerNotFoundException cnfe) {
       throw new SCMException(
@@ -339,39 +365,40 @@ public class SCMContainerManager implements ContainerManager {
     }
   }
 
-
-    /**
-     * Update deleteTransactionId according to deleteTransactionMap.
-     *
-     * @param deleteTransactionMap Maps the containerId to latest delete
-     *                             transaction id for the container.
-     * @throws IOException
-     */
+  /**
+   * Update deleteTransactionId according to deleteTransactionMap.
+   *
+   * @param deleteTransactionMap Maps the containerId to latest delete
+   *                             transaction id for the container.
+   * @throws IOException
+   */
   public void updateDeleteTransactionId(Map<Long, Long> deleteTransactionMap)
       throws IOException {
+
     if (deleteTransactionMap == null) {
       return;
     }
-
+    org.apache.hadoop.hdds.utils.db.BatchOperation batchOperation =
+        batchHandler.initBatchOperation();
     lock.lock();
     try {
-      BatchOperation batch = new BatchOperation();
       for (Map.Entry<Long, Long> entry : deleteTransactionMap.entrySet()) {
         long containerID = entry.getKey();
-        byte[] dbKey = Longs.toByteArray(containerID);
-        byte[] containerBytes = containerStore.get(dbKey);
-        if (containerBytes == null) {
+
+        ContainerID containerIdObject = new ContainerID(containerID);
+        ContainerInfo containerInfo =
+            containerStore.get(containerIdObject);
+        if (containerInfo == null) {
           throw new SCMException(
               "Failed to increment number of deleted blocks for container "
                   + containerID + ", reason : " + "container doesn't exist.",
               SCMException.ResultCodes.FAILED_TO_FIND_CONTAINER);
         }
-        ContainerInfo containerInfo = ContainerInfo.fromProtobuf(
-            HddsProtos.ContainerInfoProto.parseFrom(containerBytes));
         containerInfo.updateDeleteTransactionId(entry.getValue());
-        batch.put(dbKey, containerInfo.getProtobuf().toByteArray());
+        containerStore
+            .putWithBatch(batchOperation, containerIdObject, containerInfo);
       }
-      containerStore.writeBatch(batch);
+      batchHandler.commitBatchOperation(batchOperation);
       containerStateManager
           .updateDeleteTransactionId(deleteTransactionMap);
     } finally {
@@ -442,13 +469,11 @@ public class SCMContainerManager implements ContainerManager {
    * @param containerInfo
    * @throws IOException
    */
-  private void addContainerToDB(ContainerInfo containerInfo)
+  protected void addContainerToDB(ContainerInfo containerInfo)
       throws IOException {
     try {
-      final byte[] containerIDBytes = Longs.toByteArray(
-          containerInfo.getContainerID());
-      containerStore.put(containerIDBytes,
-          containerInfo.getProtobuf().toByteArray());
+      containerStore
+          .put(new ContainerID(containerInfo.getContainerID()), containerInfo);
       // Incrementing here, as allocateBlock to create a container calls
       // getMatchingContainer() and finally calls this API to add newly
       // created container to DB.
@@ -554,9 +579,6 @@ public class SCMContainerManager implements ContainerManager {
     if (containerStateManager != null) {
       containerStateManager.close();
     }
-    if (containerStore != null) {
-      containerStore.close();
-    }
 
     if (scmContainerManagerMetrics != null) {
       this.scmContainerManagerMetrics.unRegister();
@@ -578,5 +600,13 @@ public class SCMContainerManager implements ContainerManager {
         scmContainerManagerMetrics.incNumICRReportsProcessedFailed();
       }
     }
+  }
+
+  protected PipelineManager getPipelineManager() {
+    return pipelineManager;
+  }
+
+  public Lock getLock() {
+    return lock;
   }
 }

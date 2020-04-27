@@ -16,11 +16,15 @@
  */
 package org.apache.hadoop.hdds.scm.container.placement.algorithms;
 
-import org.apache.hadoop.conf.Configuration;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+
 import org.apache.hadoop.hdds.conf.OzoneConfiguration;
 import org.apache.hadoop.hdds.protocol.DatanodeDetails;
 import org.apache.hadoop.hdds.protocol.MockDatanodeDetails;
 import org.apache.hadoop.hdds.protocol.proto.HddsProtos.NodeState;
+import org.apache.hadoop.hdds.scm.PlacementPolicy;
 import org.apache.hadoop.hdds.scm.ScmConfigKeys;
 import org.apache.hadoop.hdds.scm.container.placement.metrics.SCMNodeMetric;
 import org.apache.hadoop.hdds.scm.exceptions.SCMException;
@@ -29,19 +33,15 @@ import org.apache.hadoop.hdds.scm.net.NetworkTopologyImpl;
 import org.apache.hadoop.hdds.scm.net.NodeSchema;
 import org.apache.hadoop.hdds.scm.net.NodeSchemaManager;
 import org.apache.hadoop.hdds.scm.node.NodeManager;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Test;
-import org.mockito.Mockito;
-
-import java.io.IOException;
-import java.util.ArrayList;
-import java.util.List;
 
 import static org.apache.hadoop.hdds.scm.net.NetConstants.LEAF_SCHEMA;
 import static org.apache.hadoop.hdds.scm.net.NetConstants.RACK_SCHEMA;
 import static org.apache.hadoop.hdds.scm.net.NetConstants.ROOT_SCHEMA;
+import org.junit.Assert;
+import org.junit.Before;
+import org.junit.Test;
 import static org.mockito.Matchers.anyObject;
+import org.mockito.Mockito;
 import static org.mockito.Mockito.when;
 
 /**
@@ -55,7 +55,7 @@ public class TestContainerPlacementFactory {
   // node storage capacity
   private final long storageCapacity = 100L;
   // configuration
-  private Configuration conf;
+  private OzoneConfiguration conf;
   // node manager
   private NodeManager nodeManager;
 
@@ -99,7 +99,7 @@ public class TestContainerPlacementFactory {
     when(nodeManager.getNodeStat(datanodes.get(4)))
         .thenReturn(new SCMNodeMetric(storageCapacity, 70L, 30L));
 
-    ContainerPlacementPolicy policy = ContainerPlacementPolicyFactory
+    PlacementPolicy policy = ContainerPlacementPolicyFactory
         .getPolicy(conf, nodeManager, cluster, true,
             SCMContainerPlacementMetrics.create());
 
@@ -117,7 +117,7 @@ public class TestContainerPlacementFactory {
 
   @Test
   public void testDefaultPolicy() throws IOException {
-    ContainerPlacementPolicy policy = ContainerPlacementPolicyFactory
+    PlacementPolicy policy = ContainerPlacementPolicyFactory
         .getPolicy(conf, null, null, true, null);
     Assert.assertSame(SCMContainerPlacementRandom.class, policy.getClass());
   }
@@ -125,7 +125,7 @@ public class TestContainerPlacementFactory {
   /**
    * A dummy container placement implementation for test.
    */
-  public static class DummyImpl implements ContainerPlacementPolicy {
+  public static class DummyImpl implements PlacementPolicy {
     @Override
     public List<DatanodeDetails> chooseDatanodes(
         List<DatanodeDetails> excludedNodes, List<DatanodeDetails> favoredNodes,

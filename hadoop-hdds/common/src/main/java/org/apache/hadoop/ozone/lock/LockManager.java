@@ -18,8 +18,7 @@
 package org.apache.hadoop.ozone.lock;
 
 import org.apache.commons.pool2.impl.GenericObjectPool;
-import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.hdds.HddsConfigKeys;
+import org.apache.hadoop.hdds.conf.ConfigurationSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -45,7 +44,7 @@ public class LockManager<R> {
    *
    * @param conf Configuration object
    */
-  public LockManager(final Configuration conf) {
+  public LockManager(final ConfigurationSource conf) {
     this(conf, false);
   }
 
@@ -56,13 +55,10 @@ public class LockManager<R> {
    * @param conf Configuration object
    * @param fair - true to use fair lock ordering, else non-fair lock ordering.
    */
-  public LockManager(final Configuration conf, boolean fair) {
-    final int maxPoolSize = conf.getInt(
-        HddsConfigKeys.HDDS_LOCK_MAX_CONCURRENCY,
-        HddsConfigKeys.HDDS_LOCK_MAX_CONCURRENCY_DEFAULT);
+  public LockManager(final ConfigurationSource conf, boolean fair) {
     lockPool =
         new GenericObjectPool<>(new PooledLockFactory(fair));
-    lockPool.setMaxTotal(maxPoolSize);
+    lockPool.setMaxTotal(-1);
   }
 
   /**

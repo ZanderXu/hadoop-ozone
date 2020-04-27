@@ -26,7 +26,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
 
-import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.hdds.conf.ConfigurationSource;
 import org.apache.hadoop.hdds.client.OzoneQuota;
 import org.apache.hadoop.hdds.scm.client.HddsClientUtils;
 import org.apache.hadoop.ozone.OzoneAcl;
@@ -88,10 +88,11 @@ public class OzoneVolume extends WithMetadata {
    * @param metadata custom key value metadata.
    */
   @SuppressWarnings("parameternumber")
-  public OzoneVolume(Configuration conf, ClientProtocol proxy, String name,
-                     String admin, String owner, long quotaInBytes,
-                     long creationTime, List<OzoneAcl> acls,
-                     Map<String, String> metadata) {
+  public OzoneVolume(ConfigurationSource conf, ClientProtocol proxy,
+      String name,
+      String admin, String owner, long quotaInBytes,
+      long creationTime, List<OzoneAcl> acls,
+      Map<String, String> metadata) {
     Preconditions.checkNotNull(proxy, "Client proxy is not set.");
     this.proxy = proxy;
     this.name = name;
@@ -105,9 +106,10 @@ public class OzoneVolume extends WithMetadata {
   }
 
   @SuppressWarnings("parameternumber")
-  public OzoneVolume(Configuration conf, ClientProtocol proxy, String name,
-                     String admin, String owner, long quotaInBytes,
-                     long creationTime, List<OzoneAcl> acls) {
+  public OzoneVolume(ConfigurationSource conf, ClientProtocol proxy,
+      String name,
+      String admin, String owner, long quotaInBytes,
+      long creationTime, List<OzoneAcl> acls) {
     this(conf, proxy, name, admin, owner, quotaInBytes, creationTime, acls,
         new HashMap<>());
   }
@@ -296,9 +298,8 @@ public class OzoneVolume extends WithMetadata {
 
     @Override
     public boolean hasNext() {
-      if(!currentIterator.hasNext()) {
-        currentIterator = getNextListOfBuckets(
-            currentValue != null ? currentValue.getName() : null)
+      if (!currentIterator.hasNext() && currentValue != null) {
+        currentIterator = getNextListOfBuckets(currentValue.getName())
             .iterator();
       }
       return currentIterator.hasNext();
@@ -316,7 +317,7 @@ public class OzoneVolume extends WithMetadata {
     /**
      * Gets the next set of bucket list using proxy.
      * @param prevBucket
-     * @return {@code List<OzoneVolume>}
+     * @return {@code List<OzoneBucket>}
      */
     private List<OzoneBucket> getNextListOfBuckets(String prevBucket) {
       try {

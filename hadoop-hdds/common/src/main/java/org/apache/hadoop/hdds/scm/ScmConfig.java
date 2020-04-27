@@ -27,28 +27,49 @@ import org.apache.hadoop.hdds.conf.ConfigType;
  */
 @ConfigGroup(prefix = "hdds.scm")
 public class ScmConfig {
-  private String principal;
-  private String keytab;
 
   @Config(key = "kerberos.principal",
-        type = ConfigType.STRING,
-        defaultValue = "",
-        tags = { ConfigTag.SECURITY, ConfigTag.OZONE },
-        description = "This Kerberos principal is used by the SCM service."
+      type = ConfigType.STRING,
+      defaultValue = "",
+      tags = { ConfigTag.SECURITY, ConfigTag.OZONE },
+      description = "This Kerberos principal is used by the SCM service."
   )
+  private String principal;
+
+  @Config(key = "kerberos.keytab.file",
+      type = ConfigType.STRING,
+      defaultValue = "",
+      tags = { ConfigTag.SECURITY, ConfigTag.OZONE },
+      description = "The keytab file used by SCM daemon to login as "+
+          "its service principal."
+  )
+  private String keytab;
+
+  @Config(key = "unknown-container.action",
+      type = ConfigType.STRING,
+      defaultValue = "WARN",
+      tags = { ConfigTag.SCM, ConfigTag.MANAGEMENT },
+      description =
+          "The action taken by SCM to process unknown "
+          + "containers that reported by Datanodes. The default "
+          + "action is just logging container not found warning, "
+          + "another available action is DELETE action. "
+          + "These unknown containers will be deleted under this "
+          + "action way."
+  )
+  private String action;
+
   public void setKerberosPrincipal(String kerberosPrincipal) {
     this.principal = kerberosPrincipal;
   }
 
-  @Config(key = "kerberos.keytab.file",
-        type = ConfigType.STRING,
-        defaultValue = "",
-        tags = { ConfigTag.SECURITY, ConfigTag.OZONE },
-        description = "The keytab file used by SCM daemon to login as "+
-              "its service principal."
-  )
+
   public void setKerberosKeytab(String kerberosKeytab) {
     this.keytab = kerberosKeytab;
+  }
+
+  public void setUnknownContainerAction(String unknownContainerAction) {
+    this.action = unknownContainerAction;
   }
 
   public String getKerberosPrincipal() {
@@ -57,6 +78,10 @@ public class ScmConfig {
 
   public String getKerberosKeytab() {
     return this.keytab;
+  }
+
+  public String getUnknownContainerAction() {
+    return this.action;
   }
 
   /**
@@ -73,4 +98,7 @@ public class ScmConfig {
     public static final String HDDS_SCM_KERBEROS_KEYTAB_FILE_KEY =
           "hdds.scm.kerberos.keytab.file";
   }
+
+  public static final String HDDS_SCM_UNKNOWN_CONTAINER_ACTION =
+      "hdds.scm.unknown-container.action";
 }

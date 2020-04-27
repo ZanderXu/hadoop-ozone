@@ -17,7 +17,7 @@
  */
 package org.apache.hadoop.hdds.scm.pipeline;
 
-import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.hdds.conf.ConfigurationSource;
 import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
 import org.apache.hadoop.hdds.scm.ScmConfigKeys;
 import org.apache.hadoop.ozone.OzoneConfigKeys;
@@ -41,11 +41,11 @@ class BackgroundPipelineCreator {
   private final Scheduler scheduler;
   private final AtomicBoolean isPipelineCreatorRunning;
   private final PipelineManager pipelineManager;
-  private final Configuration conf;
+  private final ConfigurationSource conf;
   private ScheduledFuture<?> periodicTask;
 
   BackgroundPipelineCreator(PipelineManager pipelineManager,
-      Scheduler scheduler, Configuration conf) {
+      Scheduler scheduler, ConfigurationSource conf) {
     this.pipelineManager = pipelineManager;
     this.conf = conf;
     this.scheduler = scheduler;
@@ -91,8 +91,13 @@ class BackgroundPipelineCreator {
   private boolean skipCreation(HddsProtos.ReplicationFactor factor,
                                HddsProtos.ReplicationType type,
                                boolean autoCreate) {
-    return factor == HddsProtos.ReplicationFactor.ONE &&
-        type == HddsProtos.ReplicationType.RATIS && (!autoCreate);
+    if (type == HddsProtos.ReplicationType.RATIS) {
+      return factor == HddsProtos.ReplicationFactor.ONE && (!autoCreate);
+    } else {
+      // For STAND_ALONE Replication Type, Replication Factor 3 should not be
+      // used.
+      return factor == HddsProtos.ReplicationFactor.THREE;
+    }
   }
 
   private void createPipelines() {
@@ -110,6 +115,15 @@ class BackgroundPipelineCreator {
         // Skip this iteration for creating pipeline
         continue;
       }
+
+      if (!pipelineManager.getSafeModeStatus()) {
+        try {
+          pipelineManager.scrubPipeline(type, factor);
+        } catch (IOException e) {
+          LOG.error("Error while scrubbing pipelines {}", e);
+        }
+      }
+
       while (true) {
         try {
           if (scheduler.isClosed()) {

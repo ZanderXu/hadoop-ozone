@@ -19,14 +19,6 @@
 
 package org.apache.hadoop.hdds.security.x509;
 
-import com.google.common.base.Preconditions;
-import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.ozone.OzoneConfigKeys;
-import org.apache.ratis.thirdparty.io.netty.handler.ssl.SslProvider;
-import org.bouncycastle.jce.provider.BouncyCastleProvider;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.security.Provider;
@@ -34,18 +26,21 @@ import java.security.Security;
 import java.time.Duration;
 import java.util.concurrent.TimeUnit;
 
+import org.apache.hadoop.hdds.conf.ConfigurationSource;
+import org.apache.hadoop.ozone.OzoneConfigKeys;
+
+import com.google.common.base.Preconditions;
+import static org.apache.hadoop.hdds.HddsConfigKeys.HDDS_BLOCK_TOKEN_ENABLED;
+import static org.apache.hadoop.hdds.HddsConfigKeys.HDDS_BLOCK_TOKEN_ENABLED_DEFAULT;
 import static org.apache.hadoop.hdds.HddsConfigKeys.HDDS_DEFAULT_KEY_ALGORITHM;
 import static org.apache.hadoop.hdds.HddsConfigKeys.HDDS_DEFAULT_KEY_LEN;
 import static org.apache.hadoop.hdds.HddsConfigKeys.HDDS_DEFAULT_SECURITY_PROVIDER;
-import static org.apache.hadoop.hdds.HddsConfigKeys.HDDS_BLOCK_TOKEN_ENABLED;
-import static org.apache.hadoop.hdds.HddsConfigKeys.HDDS_BLOCK_TOKEN_ENABLED_DEFAULT;
 import static org.apache.hadoop.hdds.HddsConfigKeys.HDDS_GRPC_TLS_ENABLED;
 import static org.apache.hadoop.hdds.HddsConfigKeys.HDDS_GRPC_TLS_ENABLED_DEFAULT;
 import static org.apache.hadoop.hdds.HddsConfigKeys.HDDS_GRPC_TLS_PROVIDER;
 import static org.apache.hadoop.hdds.HddsConfigKeys.HDDS_GRPC_TLS_PROVIDER_DEFAULT;
 import static org.apache.hadoop.hdds.HddsConfigKeys.HDDS_GRPC_TLS_TEST_CERT;
 import static org.apache.hadoop.hdds.HddsConfigKeys.HDDS_GRPC_TLS_TEST_CERT_DEFAULT;
-
 import static org.apache.hadoop.hdds.HddsConfigKeys.HDDS_KEY_ALGORITHM;
 import static org.apache.hadoop.hdds.HddsConfigKeys.HDDS_KEY_DIR_NAME;
 import static org.apache.hadoop.hdds.HddsConfigKeys.HDDS_KEY_DIR_NAME_DEFAULT;
@@ -56,8 +51,10 @@ import static org.apache.hadoop.hdds.HddsConfigKeys.HDDS_PRIVATE_KEY_FILE_NAME_D
 import static org.apache.hadoop.hdds.HddsConfigKeys.HDDS_PUBLIC_KEY_FILE_NAME;
 import static org.apache.hadoop.hdds.HddsConfigKeys.HDDS_PUBLIC_KEY_FILE_NAME_DEFAULT;
 import static org.apache.hadoop.hdds.HddsConfigKeys.HDDS_SECURITY_PROVIDER;
-import static org.apache.hadoop.hdds.HddsConfigKeys.HDDS_X509_DEFAULT_DURATION_DEFAULT;
+import static org.apache.hadoop.hdds.HddsConfigKeys.HDDS_X509_CRL_NAME;
+import static org.apache.hadoop.hdds.HddsConfigKeys.HDDS_X509_CRL_NAME_DEFAULT;
 import static org.apache.hadoop.hdds.HddsConfigKeys.HDDS_X509_DEFAULT_DURATION;
+import static org.apache.hadoop.hdds.HddsConfigKeys.HDDS_X509_DEFAULT_DURATION_DEFAULT;
 import static org.apache.hadoop.hdds.HddsConfigKeys.HDDS_X509_DIR_NAME;
 import static org.apache.hadoop.hdds.HddsConfigKeys.HDDS_X509_DIR_NAME_DEFAULT;
 import static org.apache.hadoop.hdds.HddsConfigKeys.HDDS_X509_FILE_NAME;
@@ -70,6 +67,10 @@ import static org.apache.hadoop.hdds.HddsConfigKeys.OZONE_METADATA_DIRS;
 import static org.apache.hadoop.hdds.scm.ScmConfigKeys.HDDS_DATANODE_DIR_KEY;
 import static org.apache.hadoop.ozone.OzoneConfigKeys.OZONE_SECURITY_ENABLED_DEFAULT;
 import static org.apache.hadoop.ozone.OzoneConfigKeys.OZONE_SECURITY_ENABLED_KEY;
+import org.apache.ratis.thirdparty.io.netty.handler.ssl.SslProvider;
+import org.bouncycastle.jce.provider.BouncyCastleProvider;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * A class that deals with all Security related configs in HDDS.
@@ -81,7 +82,7 @@ public class SecurityConfig {
   private static final Logger LOG =
       LoggerFactory.getLogger(SecurityConfig.class);
   private static volatile Provider provider;
-  private final Configuration configuration;
+  private final ConfigurationSource configuration;
   private final int size;
   private final String keyAlgo;
   private final String providerString;
@@ -95,16 +96,17 @@ public class SecurityConfig {
   private final String certificateDir;
   private final String certificateFileName;
   private final boolean grpcTlsEnabled;
-  private boolean grpcTlsUseTestCert;
   private final Duration defaultCertDuration;
   private final boolean isSecurityEnabled;
+  private final String crlName;
+  private boolean grpcTlsUseTestCert;
 
   /**
    * Constructs a SecurityConfig.
    *
    * @param configuration - HDDS Configuration
    */
-  public SecurityConfig(Configuration configuration) {
+  public SecurityConfig(ConfigurationSource configuration) {
     Preconditions.checkNotNull(configuration, "Configuration cannot be null");
     this.configuration = configuration;
     this.size = this.configuration.getInt(HDDS_KEY_LEN, HDDS_DEFAULT_KEY_LEN);
@@ -157,6 +159,8 @@ public class SecurityConfig {
             HDDS_X509_DEFAULT_DURATION_DEFAULT);
     defaultCertDuration = Duration.parse(certDurationString);
 
+    this.crlName = this.configuration.get(HDDS_X509_CRL_NAME,
+                                          HDDS_X509_CRL_NAME_DEFAULT);
 
     // First Startup -- if the provider is null, check for the provider.
     if (SecurityConfig.provider == null) {
@@ -172,8 +176,17 @@ public class SecurityConfig {
   }
 
   /**
-   * Returns true if security is enabled for OzoneCluster. This is determined
-   * by value of OZONE_SECURITY_ENABLED_KEY.
+   * Returns the CRL Name.
+   *
+   * @return String.
+   */
+  public String getCrlName() {
+    return crlName;
+  }
+
+  /**
+   * Returns true if security is enabled for OzoneCluster. This is determined by
+   * value of OZONE_SECURITY_ENABLED_KEY.
    *
    * @return true if security is enabled for OzoneCluster.
    */
@@ -234,8 +247,7 @@ public class SecurityConfig {
 
   /**
    * Returns the File path to where certificates are stored with an addition
-   * component
-   * name inserted in between.
+   * component name inserted in between.
    *
    * @param component - Component Name - String.
    * @return Path location.
@@ -293,7 +305,7 @@ public class SecurityConfig {
    *
    * @return Configuration
    */
-  public Configuration getConfiguration() {
+  public ConfigurationSource getConfiguration() {
     return configuration;
   }
 
@@ -317,6 +329,7 @@ public class SecurityConfig {
 
   /**
    * Returns true if TLS is enabled for gRPC services.
+   *
    * @return true if TLS is enabled for gRPC services.
    */
   public boolean isGrpcTlsEnabled() {
@@ -325,6 +338,7 @@ public class SecurityConfig {
 
   /**
    * Get the gRPC TLS provider.
+   *
    * @return the gRPC TLS Provider.
    */
   public SslProvider getGrpcSslProvider() {
@@ -333,10 +347,11 @@ public class SecurityConfig {
   }
 
   /**
-   * Return true if using test certificates with authority as localhost.
-   * This should be used only for unit test where certificates are generated
-   * by openssl with localhost as DN and should never use for production as it
-   * will bypass the hostname/ip matching verification.
+   * Return true if using test certificates with authority as localhost. This
+   * should be used only for unit test where certificates are generated by
+   * openssl with localhost as DN and should never use for production as it will
+   * bypass the hostname/ip matching verification.
+   *
    * @return true if using test certificates.
    */
   public boolean useTestCert() {
@@ -360,12 +375,12 @@ public class SecurityConfig {
   }
 
   /**
-   * Returns max date for which S3 tokens will be valid.
+   * Returns max date for which S3 auth info objects will be valid.
    */
-  public long getS3TokenMaxDate() {
+  public long getS3AuthInfoMaxDate() {
     return getConfiguration().getTimeDuration(
-        OzoneConfigKeys.OZONE_S3_TOKEN_MAX_LIFETIME_KEY,
-        OzoneConfigKeys.OZONE_S3_TOKEN_MAX_LIFETIME_KEY_DEFAULT,
+        OzoneConfigKeys.OZONE_S3_AUTHINFO_MAX_LIFETIME_KEY,
+        OzoneConfigKeys.OZONE_S3_AUTHINFO_MAX_LIFETIME_KEY_DEFAULT,
         TimeUnit.MICROSECONDS);
   }
 }

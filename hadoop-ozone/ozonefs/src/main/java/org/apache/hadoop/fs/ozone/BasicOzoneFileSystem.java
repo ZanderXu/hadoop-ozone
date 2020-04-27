@@ -20,6 +20,7 @@ package org.apache.hadoop.fs.ozone;
 
 import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.util.EnumSet;
@@ -31,18 +32,23 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
-import org.apache.hadoop.classification.InterfaceAudience;
-import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.BlockLocation;
 import org.apache.hadoop.fs.CreateFlag;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileAlreadyExistsException;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.LocatedFileStatus;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.PathIsNotEmptyDirectoryException;
 import org.apache.hadoop.fs.permission.FsPermission;
+import org.apache.hadoop.hdds.annotation.InterfaceAudience;
+import org.apache.hadoop.hdds.annotation.InterfaceStability;
+import org.apache.hadoop.hdds.conf.ConfigurationSource;
+import org.apache.hadoop.hdds.conf.OzoneConfiguration;
+import org.apache.hadoop.hdds.utils.LegacyHadoopConfigurationSource;
 import org.apache.hadoop.ozone.om.exceptions.OMException;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.token.Token;
@@ -54,7 +60,6 @@ import static org.apache.hadoop.fs.ozone.Constants.OZONE_DEFAULT_USER;
 import static org.apache.hadoop.fs.ozone.Constants.OZONE_USER_DIR;
 import static org.apache.hadoop.ozone.OzoneConsts.OZONE_URI_DELIMITER;
 import static org.apache.hadoop.ozone.OzoneConsts.OZONE_URI_SCHEME;
-
 import org.apache.http.client.utils.URIBuilder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -138,7 +143,7 @@ public class BasicOzoneFileSystem extends FileSystem {
       uri = new URIBuilder().setScheme(OZONE_URI_SCHEME)
           .setHost(authority)
           .build();
-      LOG.trace("Ozone URI for ozfs initialization is " + uri);
+      LOG.trace("Ozone URI for ozfs initialization is {}", uri);
 
       //isolated is the default for ozonefs-lib-legacy which includes the
       // /ozonefs.txt, otherwise the default is false. It could be overridden.
@@ -152,7 +157,15 @@ public class BasicOzoneFileSystem extends FileSystem {
       boolean isolatedClassloader =
           conf.getBoolean("ozone.fs.isolated-classloader", defaultValue);
 
-      this.adapter = createAdapter(conf, bucketStr, volumeStr, omHost, omPort,
+      ConfigurationSource source;
+      if (conf instanceof OzoneConfiguration) {
+        source = (ConfigurationSource) conf;
+      } else {
+        source = new LegacyHadoopConfigurationSource(conf);
+      }
+      this.adapter =
+          createAdapter(source, bucketStr,
+              volumeStr, omHost, omPort,
           isolatedClassloader);
 
       try {
@@ -163,6 +176,7 @@ public class BasicOzoneFileSystem extends FileSystem {
       }
       this.workingDir = new Path(OZONE_USER_DIR, this.userName)
           .makeQualified(this.uri, this.workingDir);
+
     } catch (URISyntaxException ue) {
       final String msg = "Invalid Ozone endpoint " + name;
       LOG.error(msg, ue);
@@ -170,7 +184,7 @@ public class BasicOzoneFileSystem extends FileSystem {
     }
   }
 
-  protected OzoneClientAdapter createAdapter(Configuration conf,
+  protected OzoneClientAdapter createAdapter(ConfigurationSource conf,
       String bucketStr,
       String volumeStr, String omHost, int omPort,
       boolean isolatedClassloader) throws IOException {
@@ -212,8 +226,12 @@ public class BasicOzoneFileSystem extends FileSystem {
     statistics.incrementReadOps(1);
     LOG.trace("open() path:{}", f);
     final String key = pathToKey(f);
-    return new FSDataInputStream(
-        new OzoneFSInputStream(adapter.readFile(key), statistics));
+    InputStream inputStream = adapter.readFile(key);
+    return new FSDataInputStream(createFSInputStream(inputStream));
+  }
+
+  protected InputStream createFSInputStream(InputStream inputStream) {
+    return new OzoneFSInputStream(inputStream, statistics);
   }
 
   protected void incrementCounter(Statistic statistic) {
@@ -229,7 +247,7 @@ public class BasicOzoneFileSystem extends FileSystem {
     incrementCounter(Statistic.INVOCATION_CREATE);
     statistics.incrementWriteOps(1);
     final String key = pathToKey(f);
-    return createOutputStream(key, overwrite, true);
+    return createOutputStream(key, replication, overwrite, true);
   }
 
   @Override
@@ -243,13 +261,14 @@ public class BasicOzoneFileSystem extends FileSystem {
     incrementCounter(Statistic.INVOCATION_CREATE_NON_RECURSIVE);
     statistics.incrementWriteOps(1);
     final String key = pathToKey(path);
-    return createOutputStream(key, flags.contains(CreateFlag.OVERWRITE), false);
+    return createOutputStream(key,
+        replication, flags.contains(CreateFlag.OVERWRITE), false);
   }
 
-  private FSDataOutputStream createOutputStream(String key, boolean overwrite,
-      boolean recursive) throws IOException {
-    return new FSDataOutputStream(adapter.createFile(key, overwrite, recursive),
-        statistics);
+  private FSDataOutputStream createOutputStream(String key, short replication,
+      boolean overwrite, boolean recursive) throws IOException {
+    return new FSDataOutputStream(adapter.createFile(key,
+        replication, overwrite, recursive), statistics);
   }
 
   @Override
@@ -412,7 +431,7 @@ public class BasicOzoneFileSystem extends FileSystem {
         LOG.trace("Skipping deleting root directory");
         return true;
       } else {
-        LOG.trace("deleting key:" + key);
+        LOG.trace("deleting key:{}", key);
         boolean succeed = adapter.deleteObject(key);
         // if recursive delete is requested ignore the return value of
         // deleteObject and issue deletes for other keys.
@@ -433,6 +452,12 @@ public class BasicOzoneFileSystem extends FileSystem {
     LOG.trace("delete() path:{} recursive:{}", f, recursive);
     try {
       DeleteIterator iterator = new DeleteIterator(f, recursive);
+
+      if (f.isRoot()) {
+        LOG.warn("Cannot delete root directory.");
+        return false;
+      }
+
       return iterator.iterate();
     } catch (FileNotFoundException e) {
       if (LOG.isDebugEnabled()) {
@@ -460,12 +485,6 @@ public class BasicOzoneFileSystem extends FileSystem {
 
     if (status.isDirectory()) {
       LOG.debug("delete: Path is a directory: {}", f);
-      key = addTrailingSlashIfNeeded(key);
-
-      if (key.equals("/")) {
-        LOG.warn("Cannot delete root directory.");
-        return false;
-      }
 
       result = innerDelete(f, recursive);
     } else {
@@ -638,6 +657,22 @@ public class BasicOzoneFileSystem extends FileSystem {
     return fileStatus;
   }
 
+  @Override
+  public BlockLocation[] getFileBlockLocations(FileStatus fileStatus,
+                                               long start, long len)
+      throws IOException {
+    if (fileStatus instanceof LocatedFileStatus) {
+      return ((LocatedFileStatus) fileStatus).getBlockLocations();
+    } else {
+      return super.getFileBlockLocations(fileStatus, start, len);
+    }
+  }
+
+  @Override
+  public short getDefaultReplication() {
+    return adapter.getDefaultReplication();
+  }
+
   /**
    * Turn a path (relative or otherwise) into an Ozone key.
    *
@@ -779,7 +814,7 @@ public class BasicOzoneFileSystem extends FileSystem {
       //NOOP: If not symlink symlink remains null.
     }
 
-    return new FileStatus(
+    FileStatus fileStatus =  new FileStatus(
         fileStatusAdapter.getLength(),
         fileStatusAdapter.isDir(),
         fileStatusAdapter.getBlockReplication(),
@@ -793,5 +828,11 @@ public class BasicOzoneFileSystem extends FileSystem {
         fileStatusAdapter.getPath()
     );
 
+    BlockLocation[] blockLocations = fileStatusAdapter.getBlockLocations();
+    if (blockLocations == null || blockLocations.length == 0) {
+      return fileStatus;
+    }
+    return new LocatedFileStatus(fileStatus, blockLocations);
   }
+
 }

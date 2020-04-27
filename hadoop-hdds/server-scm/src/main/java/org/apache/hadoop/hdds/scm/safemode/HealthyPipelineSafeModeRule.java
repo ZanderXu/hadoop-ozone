@@ -17,19 +17,23 @@
  */
 package org.apache.hadoop.hdds.scm.safemode;
 
-import org.apache.hadoop.conf.Configuration;
+import java.util.HashSet;
+import java.util.Set;
+
 import org.apache.hadoop.hdds.HddsConfigKeys;
+import org.apache.hadoop.hdds.conf.ConfigurationSource;
 import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
 import org.apache.hadoop.hdds.scm.events.SCMEvents;
 import org.apache.hadoop.hdds.scm.pipeline.Pipeline;
+import org.apache.hadoop.hdds.scm.pipeline.PipelineID;
 import org.apache.hadoop.hdds.scm.pipeline.PipelineManager;
-import com.google.common.base.Preconditions;
 import org.apache.hadoop.hdds.server.events.EventQueue;
 import org.apache.hadoop.hdds.server.events.TypedEvent;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Class defining Safe mode exit criteria for Pipelines.
@@ -38,18 +42,18 @@ import com.google.common.annotations.VisibleForTesting;
  * Once safe mode exit happens, this rules take care of writes can go
  * through in a cluster.
  */
-public class HealthyPipelineSafeModeRule
-    extends SafeModeExitRule<Pipeline>{
+public class HealthyPipelineSafeModeRule extends SafeModeExitRule<Pipeline> {
 
   public static final Logger LOG =
       LoggerFactory.getLogger(HealthyPipelineSafeModeRule.class);
   private int healthyPipelineThresholdCount;
   private int currentHealthyPipelineCount = 0;
   private final double healthyPipelinesPercent;
+  private final Set<PipelineID> processedPipelineIDs = new HashSet<>();
 
   HealthyPipelineSafeModeRule(String ruleName, EventQueue eventQueue,
       PipelineManager pipelineManager,
-      SCMSafeModeManager manager, Configuration configuration) {
+      SCMSafeModeManager manager, ConfigurationSource configuration) {
     super(manager, ruleName, eventQueue);
     healthyPipelinesPercent =
         configuration.getDouble(HddsConfigKeys.
@@ -116,9 +120,12 @@ public class HealthyPipelineSafeModeRule
     // create new pipelines.
     Preconditions.checkNotNull(pipeline);
     if (pipeline.getType() == HddsProtos.ReplicationType.RATIS &&
-        pipeline.getFactor() == HddsProtos.ReplicationFactor.THREE) {
+        pipeline.getFactor() == HddsProtos.ReplicationFactor.THREE &&
+        pipeline.isHealthy() &&
+        !processedPipelineIDs.contains(pipeline.getId())) {
       getSafeModeMetrics().incCurrentHealthyPipelinesCount();
       currentHealthyPipelineCount++;
+      processedPipelineIDs.add(pipeline.getId());
     }
 
     if (scmInSafeMode()) {
@@ -131,6 +138,7 @@ public class HealthyPipelineSafeModeRule
 
   @Override
   protected void cleanup() {
+    processedPipelineIDs.clear();
   }
 
   @VisibleForTesting

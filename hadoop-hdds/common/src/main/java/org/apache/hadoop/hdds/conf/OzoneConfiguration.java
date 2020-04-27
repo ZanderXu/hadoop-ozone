@@ -6,9 +6,9 @@
  * to you under the Apache License, Version 2.0 (the
  * "License"); you may not use this file except in compliance
  * with the License.  You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
+ * <p>
+ * http://www.apache.org/licenses/LICENSE-2.0
+ * <p>
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -26,25 +26,42 @@ import javax.xml.bind.annotation.XmlAccessorType;
 import javax.xml.bind.annotation.XmlElement;
 import javax.xml.bind.annotation.XmlRootElement;
 import java.io.IOException;
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
 import java.net.URL;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Enumeration;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Properties;
+import java.util.stream.Collectors;
+
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.hdds.annotation.InterfaceAudience;
+import org.apache.hadoop.hdds.utils.LegacyHadoopConfigurationSource;
 
 import com.google.common.base.Preconditions;
-import org.apache.hadoop.classification.InterfaceAudience;
-import org.apache.hadoop.conf.Configuration;
 
 /**
  * Configuration for ozone.
  */
 @InterfaceAudience.Private
-public class OzoneConfiguration extends Configuration {
+public class OzoneConfiguration extends Configuration
+    implements ConfigurationSource {
   static {
     activate();
+  }
+
+  public static OzoneConfiguration of(ConfigurationSource source) {
+    if (source instanceof LegacyHadoopConfigurationSource) {
+      return new OzoneConfiguration(((LegacyHadoopConfigurationSource) source)
+          .getOriginalHadoopConfiguration());
+    }
+    return (OzoneConfiguration) source;
+  }
+
+  public static OzoneConfiguration of(OzoneConfiguration source) {
+    return source;
   }
 
   public static OzoneConfiguration of(Configuration conf) {
@@ -92,108 +109,6 @@ public class OzoneConfiguration extends Configuration {
 
     XMLConfiguration config = (XMLConfiguration) um.unmarshal(url);
     return config.getProperties();
-  }
-
-  /**
-   * Create a Configuration object and inject the required configuration values.
-   *
-   * @param configurationClass The class where the fields are annotated with
-   *                           the configuration.
-   * @return Initiated java object where the config fields are injected.
-   */
-  public <T> T getObject(Class<T> configurationClass) {
-
-    T configuration;
-
-    try {
-      configuration = configurationClass.newInstance();
-    } catch (InstantiationException | IllegalAccessException e) {
-      throw new ConfigurationException(
-          "Configuration class can't be created: " + configurationClass, e);
-    }
-    ConfigGroup configGroup =
-        configurationClass.getAnnotation(ConfigGroup.class);
-    String prefix = configGroup.prefix();
-
-    for (Method setterMethod : configurationClass.getMethods()) {
-      if (setterMethod.isAnnotationPresent(Config.class)) {
-
-        String methodLocation =
-            configurationClass + "." + setterMethod.getName();
-
-        Config configAnnotation = setterMethod.getAnnotation(Config.class);
-
-        String key = prefix + "." + configAnnotation.key();
-
-        Class<?>[] parameterTypes = setterMethod.getParameterTypes();
-        if (parameterTypes.length != 1) {
-          throw new ConfigurationException(
-              "@Config annotation should be used on simple setter: "
-                  + methodLocation);
-        }
-
-        ConfigType type = configAnnotation.type();
-
-        if (type == ConfigType.AUTO) {
-          type = detectConfigType(parameterTypes[0], methodLocation);
-        }
-
-        //Note: default value is handled by ozone-default.xml. Here we can
-        //use any default.
-        try {
-          switch (type) {
-          case STRING:
-            setterMethod.invoke(configuration, get(key));
-            break;
-          case INT:
-            setterMethod.invoke(configuration,
-                getInt(key, 0));
-            break;
-          case BOOLEAN:
-            setterMethod.invoke(configuration,
-                getBoolean(key, false));
-            break;
-          case LONG:
-            setterMethod.invoke(configuration,
-                getLong(key, 0));
-            break;
-          case TIME:
-            setterMethod.invoke(configuration,
-                getTimeDuration(key, 0, configAnnotation.timeUnit()));
-            break;
-          default:
-            throw new ConfigurationException(
-                "Unsupported ConfigType " + type + " on " + methodLocation);
-          }
-        } catch (InvocationTargetException | IllegalAccessException e) {
-          throw new ConfigurationException(
-              "Can't inject configuration to " + methodLocation, e);
-        }
-
-      }
-    }
-    return configuration;
-
-  }
-
-  private ConfigType detectConfigType(Class<?> parameterType,
-      String methodLocation) {
-    ConfigType type;
-    if (parameterType == String.class) {
-      type = ConfigType.STRING;
-    } else if (parameterType == Integer.class || parameterType == int.class) {
-      type = ConfigType.INT;
-    } else if (parameterType == Long.class || parameterType == long.class) {
-      type = ConfigType.LONG;
-    } else if (parameterType == Boolean.class
-        || parameterType == boolean.class) {
-      type = ConfigType.BOOLEAN;
-    } else {
-      throw new ConfigurationException(
-          "Unsupported configuration type " + parameterType + " in "
-              + methodLocation);
-    }
-    return type;
   }
 
   /**
@@ -325,4 +240,27 @@ public class OzoneConfiguration extends Configuration {
     }
     return props;
   }
+
+  @Override
+  public Collection<String> getConfigKeys() {
+    return getProps().keySet()
+        .stream()
+        .map(Object::toString)
+        .collect(Collectors.toList());
+  }
+
+  @Override
+  public Map<String, String> getPropsWithPrefix(String confPrefix) {
+    Properties props = getProps();
+    Map<String, String> configMap = new HashMap<>();
+    for (String name : props.stringPropertyNames()) {
+      if (name.startsWith(confPrefix)) {
+        String value = get(name);
+        String keyName = name.substring(confPrefix.length());
+        configMap.put(keyName, value);
+      }
+    }
+    return configMap;
+  }
+  
 }

@@ -17,9 +17,11 @@
  */
 package org.apache.hadoop.ozone.recon;
 
-import com.google.inject.Provider;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.hdds.conf.OzoneConfiguration;
 
+import com.google.common.annotations.VisibleForTesting;
+import com.google.inject.Provider;
 
 /**
  * Ozone Configuration Provider.
@@ -28,16 +30,34 @@ import org.apache.hadoop.conf.Configuration;
  * it via a singleton instance to the Jax-RS/CDI instances.
  */
 public class ConfigurationProvider implements
-    Provider<Configuration> {
+    Provider<OzoneConfiguration> {
 
-  private static Configuration configuration;
+  static {
+    addDeprecations();
+  }
 
-  static void setConfiguration(Configuration conf) {
-    ConfigurationProvider.configuration = conf;
+  private static OzoneConfiguration configuration;
+
+  private static void addDeprecations() {
+    Configuration.addDeprecation(
+        ReconServerConfigKeys.OZONE_RECON_HTTP_KEYTAB_FILE_OLD,
+        ReconServerConfigKeys.OZONE_RECON_HTTP_KEYTAB_FILE);
+  }
+
+  @VisibleForTesting
+  public static void setConfiguration(OzoneConfiguration conf) {
+    if (configuration == null) {
+      ConfigurationProvider.configuration = conf;
+    }
+  }
+
+  @VisibleForTesting
+  public static void resetConfiguration() {
+    configuration = null;
   }
 
   @Override
-  public Configuration get() {
+  public OzoneConfiguration get() {
     return configuration;
   }
 }

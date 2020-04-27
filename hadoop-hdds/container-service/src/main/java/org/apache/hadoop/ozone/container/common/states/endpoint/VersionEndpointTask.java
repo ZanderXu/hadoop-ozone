@@ -16,25 +16,24 @@
  */
 package org.apache.hadoop.ozone.container.common.states.endpoint;
 
-import com.google.common.base.Preconditions;
-import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.hdds.protocol.proto
-    .StorageContainerDatanodeProtocolProtos.SCMVersionResponseProto;
-import org.apache.hadoop.ozone.OzoneConsts;
-import org.apache.hadoop.ozone.container.common.statemachine
-    .EndpointStateMachine;
-import org.apache.hadoop.ozone.container.common.utils.HddsVolumeUtil;
-import org.apache.hadoop.ozone.container.common.volume.HddsVolume;
-import org.apache.hadoop.ozone.container.common.volume.VolumeSet;
-import org.apache.hadoop.ozone.container.ozoneimpl.OzoneContainer;
-import org.apache.hadoop.ozone.protocol.VersionResponse;
-import org.apache.hadoop.util.DiskChecker.DiskOutOfSpaceException;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import java.io.IOException;
 import java.util.Map;
 import java.util.concurrent.Callable;
+
+import org.apache.hadoop.hdds.conf.ConfigurationSource;
+import org.apache.hadoop.hdds.protocol.proto.StorageContainerDatanodeProtocolProtos.SCMVersionResponseProto;
+import org.apache.hadoop.ozone.OzoneConsts;
+import org.apache.hadoop.ozone.container.common.statemachine.EndpointStateMachine;
+import org.apache.hadoop.ozone.container.common.utils.HddsVolumeUtil;
+import org.apache.hadoop.ozone.container.common.volume.HddsVolume;
+import org.apache.hadoop.ozone.container.common.volume.MutableVolumeSet;
+import org.apache.hadoop.ozone.container.ozoneimpl.OzoneContainer;
+import org.apache.hadoop.ozone.protocol.VersionResponse;
+import org.apache.hadoop.util.DiskChecker.DiskOutOfSpaceException;
+
+import com.google.common.base.Preconditions;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Task that returns version.
@@ -44,11 +43,11 @@ public class VersionEndpointTask implements
   public static final Logger LOG = LoggerFactory.getLogger(VersionEndpointTask
       .class);
   private final EndpointStateMachine rpcEndPoint;
-  private final Configuration configuration;
+  private final ConfigurationSource configuration;
   private final OzoneContainer ozoneContainer;
 
   public VersionEndpointTask(EndpointStateMachine rpcEndPoint,
-                             Configuration conf, OzoneContainer container) {
+      ConfigurationSource conf, OzoneContainer container) {
     this.rpcEndPoint = rpcEndPoint;
     this.configuration = conf;
     this.ozoneContainer = container;
@@ -63,7 +62,8 @@ public class VersionEndpointTask implements
   @Override
   public EndpointStateMachine.EndPointStates call() throws Exception {
     rpcEndPoint.lock();
-    try{
+
+    try {
       if (rpcEndPoint.getState().equals(
           EndpointStateMachine.EndPointStates.GETVERSION)) {
         SCMVersionResponseProto versionResponse =
@@ -72,43 +72,45 @@ public class VersionEndpointTask implements
             versionResponse);
         rpcEndPoint.setVersion(response);
 
-        String scmId = response.getValue(OzoneConsts.SCM_ID);
-        String clusterId = response.getValue(OzoneConsts.CLUSTER_ID);
+        if (!rpcEndPoint.isPassive()) {
+          // If end point is passive, datanode does not need to check volumes.
+          String scmId = response.getValue(OzoneConsts.SCM_ID);
+          String clusterId = response.getValue(OzoneConsts.CLUSTER_ID);
 
-        // Check volumes
-        VolumeSet volumeSet = ozoneContainer.getVolumeSet();
-        volumeSet.writeLock();
-        try {
-          Map<String, HddsVolume> volumeMap = volumeSet.getVolumeMap();
+          // Check volumes
+          MutableVolumeSet volumeSet = ozoneContainer.getVolumeSet();
+          volumeSet.writeLock();
+          try {
+            Map<String, HddsVolume> volumeMap = volumeSet.getVolumeMap();
 
-          Preconditions.checkNotNull(scmId, "Reply from SCM: scmId cannot be " +
-              "null");
-          Preconditions.checkNotNull(clusterId, "Reply from SCM: clusterId " +
-              "cannot be null");
+            Preconditions.checkNotNull(scmId,
+                "Reply from SCM: scmId cannot be null");
+            Preconditions.checkNotNull(clusterId,
+                "Reply from SCM: clusterId cannot be null");
 
-          // If version file does not exist
-          // create version file and also set scmId
+            // If version file does not exist
+            // create version file and also set scmId
 
-          for (Map.Entry<String, HddsVolume> entry : volumeMap.entrySet()) {
-            HddsVolume hddsVolume = entry.getValue();
-            boolean result = HddsVolumeUtil.checkVolume(hddsVolume, scmId,
-                clusterId, LOG);
-            if (!result) {
-              volumeSet.failVolume(hddsVolume.getHddsRootDir().getPath());
+            for (Map.Entry<String, HddsVolume> entry : volumeMap.entrySet()) {
+              HddsVolume hddsVolume = entry.getValue();
+              boolean result = HddsVolumeUtil.checkVolume(hddsVolume, scmId,
+                  clusterId, LOG);
+              if (!result) {
+                volumeSet.failVolume(hddsVolume.getHddsRootDir().getPath());
+              }
             }
+            if (volumeSet.getVolumesList().size() == 0) {
+              // All volumes are in inconsistent state
+              throw new DiskOutOfSpaceException(
+                  "All configured Volumes are in Inconsistent State");
+            }
+          } finally {
+            volumeSet.writeUnlock();
           }
-          if (volumeSet.getVolumesList().size() == 0) {
-            // All volumes are in inconsistent state
-            throw new DiskOutOfSpaceException("All configured Volumes are in " +
-                "Inconsistent State");
-          }
-        } finally {
-          volumeSet.writeUnlock();
+
+          // Start the container services after getting the version information
+          ozoneContainer.start(scmId);
         }
-
-        // Start the container services after getting the version information
-        ozoneContainer.start(scmId);
-
         EndpointStateMachine.EndPointStates nextState =
             rpcEndPoint.getState().getNextState();
         rpcEndPoint.setState(nextState);

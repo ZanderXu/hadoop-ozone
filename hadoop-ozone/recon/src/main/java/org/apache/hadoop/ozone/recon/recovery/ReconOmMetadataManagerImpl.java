@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -25,6 +25,7 @@ import java.io.File;
 import java.io.IOException;
 
 import javax.inject.Inject;
+import javax.inject.Singleton;
 
 import org.apache.commons.io.FileUtils;
 import org.apache.hadoop.hdds.conf.OzoneConfiguration;
@@ -41,6 +42,7 @@ import org.slf4j.LoggerFactory;
  * relying on the OmMetadataManagerImpl, we can make sure all changes made to
  * schema in OM will be automatically picked up by Recon.
  */
+@Singleton
 public class ReconOmMetadataManagerImpl extends OmMetadataManagerImpl
     implements ReconOMMetadataManager {
 
@@ -49,6 +51,7 @@ public class ReconOmMetadataManagerImpl extends OmMetadataManagerImpl
 
   private OzoneConfiguration ozoneConfiguration;
   private ReconUtils reconUtils;
+  private boolean omTablesInitialized = false;
 
   @Inject
   public ReconOmMetadataManagerImpl(OzoneConfiguration configuration,
@@ -85,14 +88,14 @@ public class ReconOmMetadataManagerImpl extends OmMetadataManagerImpl
       addOMTablesAndCodecs(dbStoreBuilder);
       DBStore newStore = dbStoreBuilder.build();
       setStore(newStore);
-      LOG.info("Created OM DB snapshot at {}.",
+      LOG.info("Created OM DB handle from snapshot at {}.",
           dbFile.getAbsolutePath());
     } catch (IOException ioEx) {
-      LOG.error("Unable to initialize Recon OM DB snapshot store.",
-          ioEx);
+      LOG.error("Unable to initialize Recon OM DB snapshot store.", ioEx);
     }
     if (getStore() != null) {
       initializeOmTables();
+      omTablesInitialized = true;
     }
   }
 
@@ -119,4 +122,12 @@ public class ReconOmMetadataManagerImpl extends OmMetadataManagerImpl
     }
   }
 
+  /**
+   * Check if OM tables are initialized.
+   * @return true if OM Tables are initialized, otherwise false.
+   */
+  @Override
+  public boolean isOmTablesInitialized() {
+    return omTablesInitialized;
+  }
 }

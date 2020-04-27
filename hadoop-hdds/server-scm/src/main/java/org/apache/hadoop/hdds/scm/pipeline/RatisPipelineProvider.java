@@ -18,130 +18,107 @@
 
 package org.apache.hadoop.hdds.scm.pipeline;
 
-import org.apache.hadoop.conf.Configuration;
+import java.io.IOException;
+import java.util.List;
+
+import org.apache.hadoop.hdds.conf.ConfigurationSource;
 import org.apache.hadoop.hdds.protocol.DatanodeDetails;
-import org.apache.hadoop.hdds.protocol.proto.HddsProtos.ReplicationType;
+import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
 import org.apache.hadoop.hdds.protocol.proto.HddsProtos.ReplicationFactor;
-import org.apache.hadoop.hdds.protocol.proto.HddsProtos.NodeState;
+import org.apache.hadoop.hdds.protocol.proto.HddsProtos.ReplicationType;
 import org.apache.hadoop.hdds.scm.ScmConfigKeys;
-import org.apache.hadoop.hdds.scm.container.placement.algorithms
-    .ContainerPlacementPolicy;
-import org.apache.hadoop.hdds.scm.container.placement.algorithms
-    .SCMContainerPlacementRandom;
 import org.apache.hadoop.hdds.scm.events.SCMEvents;
+import org.apache.hadoop.hdds.scm.exceptions.SCMException;
 import org.apache.hadoop.hdds.scm.node.NodeManager;
 import org.apache.hadoop.hdds.scm.pipeline.Pipeline.PipelineState;
 import org.apache.hadoop.hdds.server.events.EventPublisher;
 import org.apache.hadoop.ozone.protocol.commands.ClosePipelineCommand;
 import org.apache.hadoop.ozone.protocol.commands.CommandForDatanode;
 import org.apache.hadoop.ozone.protocol.commands.CreatePipelineCommand;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import java.io.IOException;
-import java.lang.reflect.Constructor;
-import java.lang.reflect.InvocationTargetException;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Set;
-import java.util.concurrent.ForkJoinPool;
-import java.util.concurrent.ForkJoinWorkerThread;
-import java.util.concurrent.TimeUnit;
-import java.util.stream.Collectors;
 
 /**
  * Implements Api for creating ratis pipelines.
  */
-public class RatisPipelineProvider implements PipelineProvider {
+public class RatisPipelineProvider extends PipelineProvider {
 
   private static final Logger LOG =
       LoggerFactory.getLogger(RatisPipelineProvider.class);
 
-  private final NodeManager nodeManager;
-  private final PipelineStateManager stateManager;
-  private final Configuration conf;
+  private final ConfigurationSource conf;
   private final EventPublisher eventPublisher;
-
-  // Set parallelism at 3, as now in Ratis we create 1 and 3 node pipelines.
-  private final int parallelismForPool = 3;
-
-  private final ForkJoinPool.ForkJoinWorkerThreadFactory factory =
-      (pool -> {
-        final ForkJoinWorkerThread worker = ForkJoinPool.
-            defaultForkJoinWorkerThreadFactory.newThread(pool);
-        worker.setName("RATISCREATEPIPELINE" + worker.getPoolIndex());
-        return worker;
-      });
-
-  private final ForkJoinPool forkJoinPool = new ForkJoinPool(
-      parallelismForPool, factory, null, false);
+  private final PipelinePlacementPolicy placementPolicy;
+  private int pipelineNumberLimit;
+  private int maxPipelinePerDatanode;
 
   RatisPipelineProvider(NodeManager nodeManager,
-      PipelineStateManager stateManager, Configuration conf,
+      PipelineStateManager stateManager, ConfigurationSource conf,
       EventPublisher eventPublisher) {
-    this.nodeManager = nodeManager;
-    this.stateManager = stateManager;
+    super(nodeManager, stateManager);
     this.conf = conf;
     this.eventPublisher = eventPublisher;
+    this.placementPolicy =
+        new PipelinePlacementPolicy(nodeManager, stateManager, conf);
+    this.pipelineNumberLimit = conf.getInt(
+        ScmConfigKeys.OZONE_SCM_RATIS_PIPELINE_LIMIT,
+        ScmConfigKeys.OZONE_SCM_RATIS_PIPELINE_LIMIT_DEFAULT);
+    this.maxPipelinePerDatanode = conf.getInt(
+        ScmConfigKeys.OZONE_DATANODE_PIPELINE_LIMIT,
+        ScmConfigKeys.OZONE_DATANODE_PIPELINE_LIMIT_DEFAULT);
   }
 
-
-  /**
-   * Create pluggable container placement policy implementation instance.
-   *
-   * @param nodeManager - SCM node manager.
-   * @param conf - configuration.
-   * @return SCM container placement policy implementation instance.
-   */
-  @SuppressWarnings("unchecked")
-  // TODO: should we rename ContainerPlacementPolicy to PipelinePlacementPolicy?
-  private static ContainerPlacementPolicy createContainerPlacementPolicy(
-      final NodeManager nodeManager, final Configuration conf) {
-    Class<? extends ContainerPlacementPolicy> implClass =
-        (Class<? extends ContainerPlacementPolicy>) conf.getClass(
-            ScmConfigKeys.OZONE_SCM_CONTAINER_PLACEMENT_IMPL_KEY,
-            SCMContainerPlacementRandom.class);
-
-    try {
-      Constructor<? extends ContainerPlacementPolicy> ctor =
-          implClass.getDeclaredConstructor(NodeManager.class,
-              Configuration.class);
-      return ctor.newInstance(nodeManager, conf);
-    } catch (RuntimeException e) {
-      throw e;
-    } catch (InvocationTargetException e) {
-      throw new RuntimeException(implClass.getName()
-          + " could not be constructed.", e.getCause());
-    } catch (Exception e) {
-//      LOG.error("Unhandled exception occurred, Placement policy will not " +
-//          "be functional.");
-      throw new IllegalArgumentException("Unable to load " +
-          "ContainerPlacementPolicy", e);
+  private boolean exceedPipelineNumberLimit(ReplicationFactor factor) {
+    if (factor != ReplicationFactor.THREE) {
+      // Only put limits for Factor THREE pipelines.
+      return false;
     }
+    // Per datanode limit
+    if (maxPipelinePerDatanode > 0) {
+      return (getPipelineStateManager().getPipelines(
+          ReplicationType.RATIS, factor).size() -
+          getPipelineStateManager().getPipelines(ReplicationType.RATIS, factor,
+              PipelineState.CLOSED).size()) > maxPipelinePerDatanode *
+          getNodeManager().getNodeCount(HddsProtos.NodeState.HEALTHY) /
+          factor.getNumber();
+    }
+
+    // Global limit
+    if (pipelineNumberLimit > 0) {
+      return (getPipelineStateManager().getPipelines(ReplicationType.RATIS,
+          ReplicationFactor.THREE).size() -
+          getPipelineStateManager().getPipelines(
+              ReplicationType.RATIS, ReplicationFactor.THREE,
+              PipelineState.CLOSED).size()) >
+          (pipelineNumberLimit - getPipelineStateManager().getPipelines(
+              ReplicationType.RATIS, ReplicationFactor.ONE).size());
+    }
+
+    return false;
   }
 
   @Override
   public Pipeline create(ReplicationFactor factor) throws IOException {
-    // Get set of datanodes already used for ratis pipeline
-    Set<DatanodeDetails> dnsUsed = new HashSet<>();
-    stateManager.getPipelines(ReplicationType.RATIS, factor).stream().filter(
-        p -> p.getPipelineState().equals(PipelineState.OPEN) ||
-            p.getPipelineState().equals(PipelineState.DORMANT) ||
-            p.getPipelineState().equals(PipelineState.ALLOCATED))
-        .forEach(p -> dnsUsed.addAll(p.getNodes()));
+    if (exceedPipelineNumberLimit(factor)) {
+      throw new SCMException("Ratis pipeline number meets the limit: " +
+          pipelineNumberLimit + " factor : " +
+          factor.getNumber(),
+          SCMException.ResultCodes.FAILED_TO_FIND_SUITABLE_NODE);
+    }
 
-    // Get list of healthy nodes
-    List<DatanodeDetails> dns =
-        nodeManager.getNodes(NodeState.HEALTHY)
-            .parallelStream()
-            .filter(dn -> !dnsUsed.contains(dn))
-            .limit(factor.getNumber())
-            .collect(Collectors.toList());
-    if (dns.size() < factor.getNumber()) {
-      String e = String
-          .format("Cannot create pipeline of factor %d using %d nodes.",
-              factor.getNumber(), dns.size());
-      throw new InsufficientDatanodesException(e);
+    List<DatanodeDetails> dns;
+
+    switch(factor) {
+    case ONE:
+      dns = pickNodesNeverUsed(ReplicationType.RATIS, ReplicationFactor.ONE);
+      break;
+    case THREE:
+      dns = placementPolicy.chooseDatanodes(null,
+          null, factor.getNumber(), 0);
+      break;
+    default:
+      throw new IllegalStateException("Unknown factor: " + factor.name());
     }
 
     Pipeline pipeline = Pipeline.newBuilder()
@@ -181,13 +158,6 @@ public class RatisPipelineProvider implements PipelineProvider {
 
   @Override
   public void shutdown() {
-    forkJoinPool.shutdownNow();
-    try {
-      forkJoinPool.awaitTermination(60, TimeUnit.SECONDS);
-    } catch (Exception e) {
-      LOG.error("Unexpected exception occurred during shutdown of " +
-              "RatisPipelineProvider", e);
-    }
   }
 
   /**

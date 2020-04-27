@@ -661,7 +661,7 @@ public class OmMetadataManagerImpl implements OMMetadataManager {
 
         // We should return only the keys, whose keys match with prefix and
         // the keys after the startBucket.
-        if (key.startsWith(seekPrefix) && key.compareTo(startKey) > 0) {
+        if (key.startsWith(seekPrefix) && key.compareTo(startKey) >= 0) {
           result.add(omBucketInfo);
           currentCount++;
         }
@@ -804,36 +804,39 @@ public class OmMetadataManagerImpl implements OMMetadataManager {
     return deletedKeys;
   }
 
+  /**
+   * @param userName volume owner, null for listing all volumes.
+   */
   @Override
   public List<OmVolumeArgs> listVolumes(String userName,
       String prefix, String startKey, int maxKeys) throws IOException {
-    List<OmVolumeArgs> result = Lists.newArrayList();
-    UserVolumeInfo volumes;
+
     if (StringUtil.isBlank(userName)) {
-      throw new OMException("User name is required to list Volumes.",
-          ResultCodes.USER_NOT_FOUND);
-    }
-    volumes = getVolumesByUser(userName);
-
-    if (volumes == null || volumes.getVolumeNamesCount() == 0) {
-      return result;
+      // null userName represents listing all volumes in cluster.
+      return listAllVolumes(prefix, startKey, maxKeys);
     }
 
-    boolean startKeyFound = Strings.isNullOrEmpty(startKey);
-    for (String volumeName : volumes.getVolumeNamesList()) {
-      if (!Strings.isNullOrEmpty(prefix)) {
-        if (!volumeName.startsWith(prefix)) {
-          continue;
-        }
-      }
+    final List<OmVolumeArgs> result = Lists.newArrayList();
+    final List<String> volumes = getVolumesByUser(userName)
+        .getVolumeNamesList();
 
-      if (!startKeyFound && volumeName.equals(startKey)) {
-        startKeyFound = true;
-        continue;
-      }
-      if (startKeyFound && result.size() < maxKeys) {
-        OmVolumeArgs volumeArgs =
-            getVolumeTable().get(this.getVolumeKey(volumeName));
+    int index = 0;
+    if (!Strings.isNullOrEmpty(startKey)) {
+      index = volumes.indexOf(
+          startKey.startsWith(OzoneConsts.OM_KEY_PREFIX) ?
+          startKey.substring(1) :
+          startKey);
+
+      // Exclude the startVolume as part of the result.
+      index = index != -1 ? index + 1 : index;
+    }
+    final String startChar = prefix == null ? "" : prefix;
+
+    while (index != -1 && index < volumes.size() && result.size() < maxKeys) {
+      final String volumeName = volumes.get(index);
+      if (volumeName.startsWith(startChar)) {
+        final OmVolumeArgs volumeArgs = getVolumeTable()
+            .get(getVolumeKey(volumeName));
         if (volumeArgs == null) {
           // Could not get volume info by given volume name,
           // since the volume name is loaded from db,
@@ -844,6 +847,45 @@ public class OmMetadataManagerImpl implements OMMetadataManager {
         }
         result.add(volumeArgs);
       }
+      index++;
+    }
+
+    return result;
+  }
+
+    /**
+     * @return list of all volumes.
+     */
+  private List<OmVolumeArgs> listAllVolumes(String prefix, String startKey,
+      int maxKeys) {
+    List<OmVolumeArgs> result = Lists.newArrayList();
+
+    /* volumeTable is full-cache, so we use cacheIterator. */
+    Iterator<Map.Entry<CacheKey<String>, CacheValue<OmVolumeArgs>>>
+        cacheIterator = getVolumeTable().cacheIterator();
+
+    String volumeName;
+    OmVolumeArgs omVolumeArgs;
+    boolean prefixIsEmpty = Strings.isNullOrEmpty(prefix);
+    boolean startKeyIsEmpty = Strings.isNullOrEmpty(startKey);
+    while (cacheIterator.hasNext() && result.size() < maxKeys) {
+      Map.Entry<CacheKey<String>, CacheValue<OmVolumeArgs>> entry =
+          cacheIterator.next();
+      omVolumeArgs = entry.getValue().getCacheValue();
+      volumeName = omVolumeArgs.getVolume();
+
+      if (!prefixIsEmpty && !volumeName.startsWith(prefix)) {
+        continue;
+      }
+
+      if (!startKeyIsEmpty) {
+        if (volumeName.equals(startKey)) {
+          startKeyIsEmpty = true;
+        }
+        continue;
+      }
+
+      result.add(omVolumeArgs);
     }
 
     return result;
