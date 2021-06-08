@@ -21,12 +21,13 @@ package org.apache.hadoop.ozone.client;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
+import org.apache.hadoop.hdds.client.OzoneQuota;
+import org.apache.hadoop.hdds.client.ReplicationConfig;
 import org.apache.hadoop.hdds.conf.ConfigurationSource;
 import org.apache.hadoop.hdds.protocol.StorageType;
 import org.apache.hadoop.hdds.client.ReplicationFactor;
 import org.apache.hadoop.hdds.client.ReplicationType;
 import org.apache.hadoop.hdds.scm.client.HddsClientUtils;
-import org.apache.hadoop.ozone.OzoneConfigKeys;
 import org.apache.hadoop.ozone.client.io.OzoneInputStream;
 import org.apache.hadoop.ozone.client.io.OzoneOutputStream;
 import org.apache.hadoop.ozone.client.protocol.ClientProtocol;
@@ -38,6 +39,7 @@ import org.apache.hadoop.ozone.om.helpers.OzoneFileStatus;
 import org.apache.hadoop.ozone.om.helpers.WithMetadata;
 import org.apache.hadoop.ozone.security.acl.OzoneObj;
 import org.apache.hadoop.ozone.security.acl.OzoneObjInfo;
+import org.apache.hadoop.util.Time;
 
 import java.io.IOException;
 import java.time.Instant;
@@ -46,6 +48,8 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
+
+import static org.apache.hadoop.ozone.OzoneConsts.QUOTA_RESET;
 
 /**
  * A class that encapsulates OzoneBucket.
@@ -68,12 +72,7 @@ public class OzoneBucket extends WithMetadata {
   /**
    * Default replication factor to be used while creating keys.
    */
-  private final ReplicationFactor defaultReplication;
-
-  /**
-   * Default replication type to be used while creating keys.
-   */
-  private final ReplicationType defaultReplicationType;
+  private final ReplicationConfig defaultReplication;
 
   /**
    * Type of storage to be used for this bucket.
@@ -92,9 +91,24 @@ public class OzoneBucket extends WithMetadata {
   private int listCacheSize;
 
   /**
+   * Used bytes of the bucket.
+   */
+  private long usedBytes;
+
+  /**
+   * Used namespace of the bucket.
+   */
+  private long usedNamespace;
+
+  /**
    * Creation time of the bucket.
    */
   private Instant creationTime;
+
+  /**
+   * Modification time of the bucket.
+   */
+  private Instant modificationTime;
 
   /**
    * Bucket Encryption key name if bucket encryption is enabled.
@@ -103,28 +117,26 @@ public class OzoneBucket extends WithMetadata {
 
   private OzoneObj ozoneObj;
 
+  private String sourceVolume;
+  private String sourceBucket;
+
+  /**
+   * Quota of bytes allocated for the bucket.
+   */
+  private long quotaInBytes;
+  /**
+   * Quota of key count allocated for the bucket.
+   */
+  private long quotaInNamespace;
 
   private OzoneBucket(ConfigurationSource conf, String volumeName,
-      String bucketName, ReplicationFactor defaultReplication,
-      ReplicationType defaultReplicationType, ClientProtocol proxy) {
+      String bucketName, ClientProtocol proxy) {
     Preconditions.checkNotNull(proxy, "Client proxy is not set.");
     this.volumeName = volumeName;
     this.name = bucketName;
-    if (defaultReplication == null) {
-      this.defaultReplication = ReplicationFactor.valueOf(conf.getInt(
-          OzoneConfigKeys.OZONE_REPLICATION,
-          OzoneConfigKeys.OZONE_REPLICATION_DEFAULT));
-    } else {
-      this.defaultReplication = defaultReplication;
-    }
 
-    if (defaultReplicationType == null) {
-      this.defaultReplicationType = ReplicationType.valueOf(conf.get(
-          OzoneConfigKeys.OZONE_REPLICATION_TYPE,
-          OzoneConfigKeys.OZONE_REPLICATION_TYPE_DEFAULT));
-    } else {
-      this.defaultReplicationType = defaultReplicationType;
-    }
+    this.defaultReplication = ReplicationConfig.getDefault(conf);
+
     this.proxy = proxy;
     this.ozoneObj = OzoneObjInfo.Builder.newBuilder()
         .setBucketName(bucketName)
@@ -132,18 +144,54 @@ public class OzoneBucket extends WithMetadata {
         .setResType(OzoneObj.ResourceType.BUCKET)
         .setStoreType(OzoneObj.StoreType.OZONE).build();
   }
+
   @SuppressWarnings("parameternumber")
   public OzoneBucket(ConfigurationSource conf, ClientProtocol proxy,
       String volumeName, String bucketName, StorageType storageType,
       Boolean versioning, long creationTime, Map<String, String> metadata,
-      String encryptionKeyName) {
-    this(conf, volumeName, bucketName, null, null, proxy);
+      String encryptionKeyName,
+      String sourceVolume, String sourceBucket) {
+    this(conf, volumeName, bucketName, proxy);
     this.storageType = storageType;
     this.versioning = versioning;
     this.listCacheSize = HddsClientUtils.getListCacheSize(conf);
     this.creationTime = Instant.ofEpochMilli(creationTime);
     this.metadata = metadata;
     this.encryptionKeyName = encryptionKeyName;
+    this.sourceVolume = sourceVolume;
+    this.sourceBucket = sourceBucket;
+    modificationTime = Instant.now();
+    if (modificationTime.isBefore(this.creationTime)) {
+      modificationTime = Instant.ofEpochSecond(
+          this.creationTime.getEpochSecond(), this.creationTime.getNano());
+    }
+  }
+
+  @SuppressWarnings("parameternumber")
+  public OzoneBucket(ConfigurationSource conf, ClientProtocol proxy,
+      String volumeName, String bucketName, StorageType storageType,
+      Boolean versioning, long creationTime, long modificationTime,
+      Map<String, String> metadata, String encryptionKeyName,
+      String sourceVolume, String sourceBucket) {
+    this(conf, proxy, volumeName, bucketName, storageType, versioning,
+        creationTime, metadata, encryptionKeyName, sourceVolume, sourceBucket);
+    this.modificationTime = Instant.ofEpochMilli(modificationTime);
+  }
+
+  @SuppressWarnings("parameternumber")
+  public OzoneBucket(ConfigurationSource conf, ClientProtocol proxy,
+      String volumeName, String bucketName, StorageType storageType,
+      Boolean versioning, long creationTime, long modificationTime,
+      Map<String, String> metadata, String encryptionKeyName,
+      String sourceVolume, String sourceBucket, long usedBytes,
+      long usedNamespace, long quotaInBytes, long quotaInNamespace) {
+    this(conf, proxy, volumeName, bucketName, storageType, versioning,
+        creationTime, metadata, encryptionKeyName, sourceVolume, sourceBucket);
+    this.usedBytes = usedBytes;
+    this.usedNamespace = usedNamespace;
+    this.modificationTime = Instant.ofEpochMilli(modificationTime);
+    this.quotaInBytes = quotaInBytes;
+    this.quotaInNamespace = quotaInNamespace;
   }
 
   /**
@@ -160,25 +208,42 @@ public class OzoneBucket extends WithMetadata {
   public OzoneBucket(ConfigurationSource conf, ClientProtocol proxy,
       String volumeName, String bucketName, StorageType storageType,
       Boolean versioning, long creationTime, Map<String, String> metadata) {
-    this(conf, volumeName, bucketName, null, null, proxy);
+    this(conf, volumeName, bucketName, proxy);
     this.storageType = storageType;
     this.versioning = versioning;
     this.listCacheSize = HddsClientUtils.getListCacheSize(conf);
     this.creationTime = Instant.ofEpochMilli(creationTime);
     this.metadata = metadata;
+    modificationTime = Instant.now();
+    if (modificationTime.isBefore(this.creationTime)) {
+      modificationTime = Instant.ofEpochSecond(
+          this.creationTime.getEpochSecond(), this.creationTime.getNano());
+    }
+  }
+
+  /**
+   * @param modificationTime modification time of the bucket.
+   */
+  @SuppressWarnings("parameternumber")
+  public OzoneBucket(ConfigurationSource conf, ClientProtocol proxy,
+      String volumeName, String bucketName, StorageType storageType,
+      Boolean versioning, long creationTime, long modificationTime,
+      Map<String, String> metadata) {
+    this(conf, proxy, volumeName, bucketName, storageType, versioning,
+        creationTime, metadata);
+    this.modificationTime = Instant.ofEpochMilli(modificationTime);
   }
 
   @VisibleForTesting
   @SuppressWarnings("parameternumber")
   OzoneBucket(String volumeName, String name,
-      ReplicationFactor defaultReplication,
-      ReplicationType defaultReplicationType, StorageType storageType,
+      ReplicationConfig defaultReplication,
+      StorageType storageType,
       Boolean versioning, long creationTime) {
     this.proxy = null;
     this.volumeName = volumeName;
     this.name = name;
     this.defaultReplication = defaultReplication;
-    this.defaultReplicationType = defaultReplicationType;
     this.storageType = storageType;
     this.versioning = versioning;
     this.creationTime = Instant.ofEpochMilli(creationTime);
@@ -187,8 +252,13 @@ public class OzoneBucket extends WithMetadata {
         .setVolumeName(volumeName)
         .setResType(OzoneObj.ResourceType.BUCKET)
         .setStoreType(OzoneObj.StoreType.OZONE).build();
+    long modifiedTime = Time.now();
+    if (modifiedTime < creationTime) {
+      this.modificationTime = Instant.ofEpochMilli(creationTime);
+    } else {
+      this.modificationTime = Instant.ofEpochMilli(modifiedTime);
+    }
   }
-
 
   /**
    * Returns Volume Name.
@@ -246,6 +316,15 @@ public class OzoneBucket extends WithMetadata {
   }
 
   /**
+   * Returns modification time of the Bucket.
+   *
+   * @return modification time of the bucket
+   */
+  public Instant getModificationTime() {
+    return modificationTime;
+  }
+
+  /**
    * Return the bucket encryption key name.
    * @return the bucket encryption key name
    */
@@ -253,6 +332,34 @@ public class OzoneBucket extends WithMetadata {
     return encryptionKeyName;
   }
 
+  public String getSourceVolume() {
+    return sourceVolume;
+  }
+
+  public String getSourceBucket() {
+    return sourceBucket;
+  }
+
+  /**
+   * Returns Quota allocated for the Bucket in bytes.
+   *
+   * @return quotaInBytes
+   */
+  public long getQuotaInBytes() {
+    return quotaInBytes;
+  }
+
+  /**
+   * Returns quota of key counts allocated for the Bucket.
+   *
+   * @return quotaInNamespace
+   */
+  public long getQuotaInNamespace() {
+    return quotaInNamespace;
+  }
+
+  /**
+   * Builder for OmBucketInfo.
   /**
    * Adds ACLs to the Bucket.
    * @param addAcl ACL to be added
@@ -260,7 +367,7 @@ public class OzoneBucket extends WithMetadata {
    * for the bucket.
    * @throws IOException
    */
-  public boolean addAcls(OzoneAcl addAcl) throws IOException {
+  public boolean addAcl(OzoneAcl addAcl) throws IOException {
     return proxy.addAcl(ozoneObj, addAcl);
   }
 
@@ -270,8 +377,19 @@ public class OzoneBucket extends WithMetadata {
    * removed does not exist for the bucket.
    * @throws IOException
    */
-  public boolean removeAcls(OzoneAcl removeAcl) throws IOException {
+  public boolean removeAcl(OzoneAcl removeAcl) throws IOException {
     return proxy.removeAcl(ozoneObj, removeAcl);
+  }
+
+  /**
+   * Acls to be set for given Ozone object. This operations reset ACL for
+   * given object to list of ACLs provided in argument.
+   * @param acls List of acls.
+   *
+   * @throws IOException if there is error.
+   * */
+  public boolean setAcl(List<OzoneAcl> acls) throws IOException {
+    return proxy.setAcl(ozoneObj, acls);
   }
 
   /**
@@ -295,6 +413,45 @@ public class OzoneBucket extends WithMetadata {
   }
 
   /**
+   * Clean the space quota of the bucket.
+   *
+   * @throws IOException
+   */
+  public void clearSpaceQuota() throws IOException {
+    OzoneBucket ozoneBucket = proxy.getBucketDetails(volumeName, name);
+    proxy.setBucketQuota(volumeName, name, ozoneBucket.getQuotaInNamespace(),
+        QUOTA_RESET);
+    quotaInBytes = QUOTA_RESET;
+    quotaInNamespace = ozoneBucket.getQuotaInNamespace();
+  }
+
+  /**
+   * Clean the namespace quota of the bucket.
+   *
+   * @throws IOException
+   */
+  public void clearNamespaceQuota() throws IOException {
+    OzoneBucket ozoneBucket = proxy.getBucketDetails(volumeName, name);
+    proxy.setBucketQuota(volumeName, name, QUOTA_RESET,
+        ozoneBucket.getQuotaInBytes());
+    quotaInBytes = ozoneBucket.getQuotaInBytes();
+    quotaInNamespace = QUOTA_RESET;
+  }
+
+  /**
+   * Sets/Changes the quota of this Bucket.
+   *
+   * @param quota OzoneQuota Object that can be applied to storage bucket.
+   * @throws IOException
+   */
+  public void setQuota(OzoneQuota quota) throws IOException {
+    proxy.setBucketQuota(volumeName, name, quota.getQuotaInNamespace(),
+        quota.getQuotaInBytes());
+    quotaInBytes = quota.getQuotaInBytes();
+    quotaInNamespace = quota.getQuotaInNamespace();
+  }
+
+  /**
    * Creates a new key in the bucket, with default replication type RATIS and
    * with replication factor THREE.
    * @param key Name of the key to be created.
@@ -304,7 +461,7 @@ public class OzoneBucket extends WithMetadata {
    */
   public OzoneOutputStream createKey(String key, long size)
       throws IOException {
-    return createKey(key, size, defaultReplicationType, defaultReplication,
+    return createKey(key, size, defaultReplication,
         new HashMap<>());
   }
 
@@ -317,17 +474,36 @@ public class OzoneBucket extends WithMetadata {
    * @return OzoneOutputStream to which the data has to be written.
    * @throws IOException
    */
+  @Deprecated
   public OzoneOutputStream createKey(String key, long size,
-                                     ReplicationType type,
-                                     ReplicationFactor factor,
-                                     Map<String, String> keyMetadata)
+      ReplicationType type,
+      ReplicationFactor factor,
+      Map<String, String> keyMetadata)
       throws IOException {
     return proxy
         .createKey(volumeName, name, key, size, type, factor, keyMetadata);
   }
 
   /**
+   * Creates a new key in the bucket.
+   *
+   * @param key               Name of the key to be created.
+   * @param size              Size of the data the key will point to.
+   * @param replicationConfig Replication configuration.
+   * @return OzoneOutputStream to which the data has to be written.
+   * @throws IOException
+   */
+  public OzoneOutputStream createKey(String key, long size,
+      ReplicationConfig replicationConfig,
+      Map<String, String> keyMetadata)
+      throws IOException {
+    return proxy
+        .createKey(volumeName, name, key, size, replicationConfig, keyMetadata);
+  }
+
+  /**
    * Reads an existing key from the bucket.
+   *
    * @param key Name of the key to be read.
    * @return OzoneInputStream the stream using which the data can be read.
    * @throws IOException
@@ -346,6 +522,14 @@ public class OzoneBucket extends WithMetadata {
     return proxy.getKeyDetails(volumeName, name, key);
   }
 
+  public long getUsedBytes() {
+    return usedBytes;
+  }
+
+  public long getUsedNamespace() {
+    return usedNamespace;
+  }
+
   /**
    * Returns Iterator to iterate over all keys in the bucket.
    * The result can be restricted using key prefix, will return all
@@ -354,7 +538,8 @@ public class OzoneBucket extends WithMetadata {
    * @param keyPrefix Bucket prefix to match
    * @return {@code Iterator<OzoneKey>}
    */
-  public Iterator<? extends OzoneKey> listKeys(String keyPrefix) {
+  public Iterator<? extends OzoneKey> listKeys(String keyPrefix)
+      throws IOException{
     return listKeys(keyPrefix, null);
   }
 
@@ -369,7 +554,7 @@ public class OzoneBucket extends WithMetadata {
    * @return {@code Iterator<OzoneKey>}
    */
   public Iterator<? extends OzoneKey> listKeys(String keyPrefix,
-      String prevKey) {
+      String prevKey) throws IOException {
     return new KeyIterator(keyPrefix, prevKey);
   }
 
@@ -382,9 +567,34 @@ public class OzoneBucket extends WithMetadata {
     proxy.deleteKey(volumeName, name, key);
   }
 
+  /**
+   * Deletes the given list of keys from the bucket.
+   * @param keyList List of the key name to be deleted.
+   * @throws IOException
+   */
+  public void deleteKeys(List<String> keyList) throws IOException {
+    proxy.deleteKeys(volumeName, name, keyList);
+  }
+
+  /**
+   * Rename the keyname from fromKeyName to toKeyName.
+   * @param fromKeyName The original key name.
+   * @param toKeyName New key name.
+   * @throws IOException
+   */
   public void renameKey(String fromKeyName, String toKeyName)
       throws IOException {
     proxy.renameKey(volumeName, name, fromKeyName, toKeyName);
+  }
+
+  /**
+   * Rename the key by keyMap, The key is fromKeyName and value is toKeyName.
+   * @param keyMap The key is original key name nad value is new key name.
+   * @throws IOException
+   */
+  public void renameKeys(Map<String, String> keyMap)
+      throws IOException {
+    proxy.renameKeys(volumeName, name, keyMap);
   }
 
   /**
@@ -395,25 +605,35 @@ public class OzoneBucket extends WithMetadata {
    * @return OmMultipartInfo
    * @throws IOException
    */
+  @Deprecated
   public OmMultipartInfo initiateMultipartUpload(String keyName,
-                                                 ReplicationType type,
-                                                 ReplicationFactor factor)
+      ReplicationType type,
+      ReplicationFactor factor)
       throws IOException {
-    return  proxy.initiateMultipartUpload(volumeName, name, keyName, type,
+    return proxy.initiateMultipartUpload(volumeName, name, keyName, type,
         factor);
+  }
+
+  /**
+   * Initiate multipart upload for a specified key.
+   */
+  public OmMultipartInfo initiateMultipartUpload(String keyName,
+      ReplicationConfig config)
+      throws IOException {
+    return proxy.initiateMultipartUpload(volumeName, name, keyName, config);
   }
 
   /**
    * Initiate multipart upload for a specified key, with default replication
    * type RATIS and with replication factor THREE.
+   *
    * @param key Name of the key to be created.
    * @return OmMultipartInfo.
    * @throws IOException
    */
   public OmMultipartInfo initiateMultipartUpload(String key)
       throws IOException {
-    return initiateMultipartUpload(key, defaultReplicationType,
-        defaultReplication);
+    return initiateMultipartUpload(key, defaultReplication);
   }
 
   /**
@@ -540,6 +760,28 @@ public class OzoneBucket extends WithMetadata {
   }
 
   /**
+   * OzoneFS api to creates an output stream for a file.
+   *
+   * @param keyName   Key name
+   * @param overWrite if true existing file at the location will be overwritten
+   * @param recursive if true file would be created even if parent directories
+   *                    do not exist
+   * @throws OMException if given key is a directory
+   *                     if file exists and isOverwrite flag is false
+   *                     if an ancestor exists as a file
+   *                     if bucket does not exist
+   * @throws IOException if there is error in the db
+   *                     invalid arguments
+   */
+  public OzoneOutputStream createFile(String keyName, long size,
+      ReplicationConfig replicationConfig, boolean overWrite,
+      boolean recursive) throws IOException {
+    return proxy
+        .createFile(volumeName, name, keyName, size, replicationConfig,
+            overWrite, recursive);
+  }
+
+  /**
    * List the status for a file or a directory and its contents.
    *
    * @param keyName    Absolute path of the entry to be listed
@@ -572,7 +814,6 @@ public class OzoneBucket extends WithMetadata {
   private class KeyIterator implements Iterator<OzoneKey> {
 
     private String keyPrefix = null;
-
     private Iterator<OzoneKey> currentIterator;
     private OzoneKey currentValue;
 
@@ -583,7 +824,7 @@ public class OzoneBucket extends WithMetadata {
      * The returned keys match key prefix.
      * @param keyPrefix
      */
-    KeyIterator(String keyPrefix, String prevKey) {
+    KeyIterator(String keyPrefix, String prevKey) throws IOException{
       this.keyPrefix = keyPrefix;
       this.currentValue = null;
       this.currentIterator = getNextListOfKeys(prevKey).iterator();
@@ -592,7 +833,12 @@ public class OzoneBucket extends WithMetadata {
     @Override
     public boolean hasNext() {
       if(!currentIterator.hasNext() && currentValue != null) {
-        currentIterator = getNextListOfKeys(currentValue.getName()).iterator();
+        try {
+          currentIterator =
+              getNextListOfKeys(currentValue.getName()).iterator();
+        } catch (IOException e) {
+          throw new RuntimeException(e);
+        }
       }
       return currentIterator.hasNext();
     }
@@ -611,13 +857,10 @@ public class OzoneBucket extends WithMetadata {
      * @param prevKey
      * @return {@code List<OzoneKey>}
      */
-    private List<OzoneKey> getNextListOfKeys(String prevKey) {
-      try {
-        return proxy.listKeys(volumeName, name, keyPrefix, prevKey,
-            listCacheSize);
-      } catch (IOException e) {
-        throw new RuntimeException(e);
-      }
+    private List<OzoneKey> getNextListOfKeys(String prevKey) throws
+        IOException {
+      return proxy.listKeys(volumeName, name, keyPrefix, prevKey,
+          listCacheSize);
     }
   }
 }

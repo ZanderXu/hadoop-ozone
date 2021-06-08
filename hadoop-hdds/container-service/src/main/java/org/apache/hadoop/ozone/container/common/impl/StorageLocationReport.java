@@ -55,26 +55,32 @@ public final class StorageLocationReport implements
     this.storageLocation = storageLocation;
   }
 
+  @Override
   public String getId() {
     return id;
   }
 
+  @Override
   public boolean isFailed() {
     return failed;
   }
 
+  @Override
   public long getCapacity() {
     return capacity;
   }
 
+  @Override
   public long getScmUsed() {
     return scmUsed;
   }
 
+  @Override
   public long getRemaining() {
     return remaining;
   }
 
+  @Override
   public String getStorageLocation() {
     return storageLocation;
   }
@@ -88,11 +94,14 @@ public final class StorageLocationReport implements
     return storageType;
   }
 
+  private StorageTypeProto getStorageTypeProto() throws IOException {
+    return getStorageTypeProto(getStorageType());
+  }
 
-  private StorageTypeProto getStorageTypeProto() throws
-      IOException {
+  public static StorageTypeProto getStorageTypeProto(StorageType type)
+      throws IOException {
     StorageTypeProto storageTypeProto;
-    switch (getStorageType()) {
+    switch (type) {
     case SSD:
       storageTypeProto = StorageTypeProto.SSD;
       break;
@@ -145,7 +154,7 @@ public final class StorageLocationReport implements
    * @return SCMStorageReport
    * @throws IOException In case, the storage type specified is invalid.
    */
-  public StorageReportProto getProtoBufMessage() throws IOException{
+  public StorageReportProto getProtoBufMessage() throws IOException {
     StorageReportProto.Builder srb = StorageReportProto.newBuilder();
     return srb.setStorageUuid(getId())
         .setCapacity(getCapacity())

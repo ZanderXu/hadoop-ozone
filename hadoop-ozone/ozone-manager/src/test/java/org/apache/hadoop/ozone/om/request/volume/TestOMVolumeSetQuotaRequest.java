@@ -23,12 +23,14 @@ import java.util.UUID;
 import org.apache.hadoop.ozone.om.helpers.OmVolumeArgs;
 import org.apache.hadoop.ozone.om.request.TestOMRequestUtils;
 import org.apache.hadoop.ozone.om.response.OMClientResponse;
+import org.apache.ozone.test.GenericTestUtils;
 import org.junit.Assert;
 import org.junit.Test;
 
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos;
-import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos
-    .OMRequest;
+import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.OMRequest;
+
+import static org.apache.hadoop.ozone.OzoneConsts.GB;
 
 /**
  * Tests set volume property request.
@@ -38,9 +40,11 @@ public class TestOMVolumeSetQuotaRequest extends TestOMVolumeRequest {
   @Test
   public void testPreExecute() throws Exception {
     String volumeName = UUID.randomUUID().toString();
-    long quota = 100L;
+    long quotaInBytes = 100L;
+    long quotaInNamespace = 1000L;
     OMRequest originalRequest =
-        TestOMRequestUtils.createSetVolumePropertyRequest(volumeName, quota);
+        TestOMRequestUtils.createSetVolumePropertyRequest(volumeName,
+            quotaInBytes, quotaInNamespace);
 
     OMVolumeSetQuotaRequest omVolumeSetQuotaRequest =
         new OMVolumeSetQuotaRequest(originalRequest);
@@ -54,14 +58,15 @@ public class TestOMVolumeSetQuotaRequest extends TestOMVolumeRequest {
   public void testValidateAndUpdateCacheSuccess() throws Exception {
     String volumeName = UUID.randomUUID().toString();
     String ownerName = "user1";
-    long quotaSet = 100L;
+    long quotaInBytes = 100L;
+    long quotaInNamespace = 1000L;
 
     TestOMRequestUtils.addUserToDB(volumeName, ownerName, omMetadataManager);
     TestOMRequestUtils.addVolumeToDB(volumeName, ownerName, omMetadataManager);
 
-
     OMRequest originalRequest =
-        TestOMRequestUtils.createSetVolumePropertyRequest(volumeName, quotaSet);
+        TestOMRequestUtils.createSetVolumePropertyRequest(volumeName,
+            quotaInBytes, quotaInNamespace);
 
     OMVolumeSetQuotaRequest omVolumeSetQuotaRequest =
         new OMVolumeSetQuotaRequest(originalRequest);
@@ -75,7 +80,8 @@ public class TestOMVolumeSetQuotaRequest extends TestOMVolumeRequest {
         omMetadataManager.getVolumeTable().get(volumeKey);
     // As request is valid volume table should not have entry.
     Assert.assertNotNull(omVolumeArgs);
-    long quotaBeforeSet = omVolumeArgs.getQuotaInBytes();
+    long quotaBytesBeforeSet = omVolumeArgs.getQuotaInBytes();
+    long quotaNamespaceBeforeSet = omVolumeArgs.getQuotaInNamespace();
 
     OMClientResponse omClientResponse =
         omVolumeSetQuotaRequest.validateAndUpdateCache(ozoneManager, 1,
@@ -88,20 +94,32 @@ public class TestOMVolumeSetQuotaRequest extends TestOMVolumeRequest {
         omResponse.getStatus());
 
 
-    long quotaAfterSet = omMetadataManager
-        .getVolumeTable().get(volumeKey).getQuotaInBytes();
-    Assert.assertEquals(quotaSet, quotaAfterSet);
-    Assert.assertNotEquals(quotaBeforeSet, quotaAfterSet);
+    OmVolumeArgs ova = omMetadataManager.getVolumeTable().get(volumeKey);
+    long quotaBytesAfterSet = ova.getQuotaInBytes();
+    long quotaNamespaceAfterSet = ova.getQuotaInNamespace();
+    Assert.assertEquals(quotaInBytes, quotaBytesAfterSet);
+    Assert.assertEquals(quotaInNamespace, quotaNamespaceAfterSet);
+    Assert.assertNotEquals(quotaBytesBeforeSet, quotaBytesAfterSet);
+    Assert.assertNotEquals(quotaNamespaceBeforeSet, quotaNamespaceAfterSet);
+
+    // modificationTime should be greater than creationTime.
+    long creationTime = omMetadataManager
+        .getVolumeTable().get(volumeKey).getCreationTime();
+    long modificationTime = omMetadataManager
+        .getVolumeTable().get(volumeKey).getModificationTime();
+    Assert.assertTrue(modificationTime > creationTime);
   }
 
   @Test
   public void testValidateAndUpdateCacheWithVolumeNotFound()
       throws Exception {
     String volumeName = UUID.randomUUID().toString();
-    long quota = 100L;
+    long quotaInBytes = 100L;
+    long quotaInNamespace= 100L;
 
     OMRequest originalRequest =
-        TestOMRequestUtils.createSetVolumePropertyRequest(volumeName, quota);
+        TestOMRequestUtils.createSetVolumePropertyRequest(volumeName,
+            quotaInBytes, quotaInNamespace);
 
     OMVolumeSetQuotaRequest omVolumeSetQuotaRequest =
         new OMVolumeSetQuotaRequest(originalRequest);
@@ -145,32 +163,32 @@ public class TestOMVolumeSetQuotaRequest extends TestOMVolumeRequest {
   }
 
   @Test
-  public void testReplayRequest() throws Exception {
-    // create volume
-    String volumeName = UUID.randomUUID().toString();
-    String ownerName = "user1";
-    TestOMRequestUtils.addUserToDB(volumeName, ownerName, omMetadataManager);
-    TestOMRequestUtils.addVolumeToDB(volumeName, ownerName, omMetadataManager);
+  public void testValidateAndUpdateCacheWithQuota() throws Exception {
 
-    // create request with quota set.
-    long quota = 100L;
+    String volumeName = UUID.randomUUID().toString();
+    String bucketName = UUID.randomUUID().toString();
+
+    TestOMRequestUtils.addVolumeToDB(
+        volumeName, omMetadataManager, 10 * GB);
+    TestOMRequestUtils.addBucketToDB(
+        volumeName, bucketName, omMetadataManager, 8 * GB);
     OMRequest originalRequest =
-        TestOMRequestUtils.createSetVolumePropertyRequest(volumeName, quota);
+        TestOMRequestUtils.createSetVolumePropertyRequest(volumeName,
+            5 * GB, 100L);
+
     OMVolumeSetQuotaRequest omVolumeSetQuotaRequest =
         new OMVolumeSetQuotaRequest(originalRequest);
 
-    // Execute the original request
-    omVolumeSetQuotaRequest.preExecute(ozoneManager);
-    omVolumeSetQuotaRequest.validateAndUpdateCache(ozoneManager, 1,
-        ozoneManagerDoubleBufferHelper);
-
-    // Replay the transaction - Execute the same request again
-    OMClientResponse omClientResponse =
-        omVolumeSetQuotaRequest.validateAndUpdateCache(ozoneManager, 1,
-            ozoneManagerDoubleBufferHelper);
-
-    // Replay should result in Replay response
-    Assert.assertEquals(OzoneManagerProtocolProtos.Status.REPLAY,
-        omClientResponse.getOMResponse().getStatus());
+    int countException = 0;
+    try {
+      omVolumeSetQuotaRequest.validateAndUpdateCache(ozoneManager, 1,
+          ozoneManagerDoubleBufferHelper);
+    } catch (IllegalArgumentException ex) {
+      countException++;
+      GenericTestUtils.assertExceptionContains(
+          "Total buckets quota in this volume should not be " +
+              "greater than volume quota", ex);
+    }
+    Assert.assertEquals(1, countException);
   }
 }

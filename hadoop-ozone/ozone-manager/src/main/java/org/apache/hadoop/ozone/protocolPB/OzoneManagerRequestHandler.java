@@ -22,6 +22,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Collectors;
 
+import org.apache.hadoop.hdds.client.ReplicationConfig;
 import org.apache.hadoop.hdds.scm.container.common.helpers.ExcludeList;
 import org.apache.hadoop.hdds.utils.db.SequenceNumberNotFoundException;
 import org.apache.hadoop.ozone.OzoneAcl;
@@ -45,6 +46,7 @@ import org.apache.hadoop.ozone.om.ratis.utils.OzoneManagerRatisUtils;
 import org.apache.hadoop.ozone.om.request.OMClientRequest;
 import org.apache.hadoop.ozone.om.request.util.OmResponseUtil;
 import org.apache.hadoop.ozone.om.response.OMClientResponse;
+import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.AllocateBlockRequest;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.AllocateBlockResponse;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.CheckVolumeAccessRequest;
@@ -148,17 +150,17 @@ public class OzoneManagerRequestHandler implements RequestHandler {
         break;
       case LookupKey:
         LookupKeyResponse lookupKeyResponse = lookupKey(
-            request.getLookupKeyRequest());
+            request.getLookupKeyRequest(), request.getVersion());
         responseBuilder.setLookupKeyResponse(lookupKeyResponse);
         break;
       case ListKeys:
         ListKeysResponse listKeysResponse = listKeys(
-            request.getListKeysRequest());
+            request.getListKeysRequest(), request.getVersion());
         responseBuilder.setListKeysResponse(listKeysResponse);
         break;
       case ListTrash:
         ListTrashResponse listTrashResponse = listTrash(
-            request.getListTrashRequest());
+            request.getListTrashRequest(), request.getVersion());
         responseBuilder.setListTrashResponse(listTrashResponse);
         break;
       case ListMultiPartUploadParts:
@@ -182,18 +184,18 @@ public class OzoneManagerRequestHandler implements RequestHandler {
         responseBuilder.setDbUpdatesResponse(dbUpdatesResponse);
         break;
       case GetFileStatus:
-        GetFileStatusResponse getFileStatusResponse =
-            getOzoneFileStatus(request.getGetFileStatusRequest());
+        GetFileStatusResponse getFileStatusResponse = getOzoneFileStatus(
+            request.getGetFileStatusRequest(), request.getVersion());
         responseBuilder.setGetFileStatusResponse(getFileStatusResponse);
         break;
       case LookupFile:
         LookupFileResponse lookupFileResponse =
-            lookupFile(request.getLookupFileRequest());
+            lookupFile(request.getLookupFileRequest(), request.getVersion());
         responseBuilder.setLookupFileResponse(lookupFileResponse);
         break;
       case ListStatus:
         ListStatusResponse listStatusResponse =
-            listStatus(request.getListStatusRequest());
+            listStatus(request.getListStatusRequest(), request.getVersion());
         responseBuilder.setListStatusResponse(listStatusResponse);
         break;
       case GetAcl:
@@ -349,8 +351,8 @@ public class OzoneManagerRequestHandler implements RequestHandler {
     return resp.build();
   }
 
-  private LookupKeyResponse lookupKey(LookupKeyRequest request)
-      throws IOException {
+  private LookupKeyResponse lookupKey(LookupKeyRequest request,
+      int clientVersion) throws IOException {
     LookupKeyResponse.Builder resp =
         LookupKeyResponse.newBuilder();
     KeyArgs keyArgs = request.getKeyArgs();
@@ -362,7 +364,7 @@ public class OzoneManagerRequestHandler implements RequestHandler {
         .setSortDatanodesInPipeline(keyArgs.getSortDatanodes())
         .build();
     OmKeyInfo keyInfo = impl.lookupKey(omKeyArgs);
-    resp.setKeyInfo(keyInfo.getProtobuf());
+    resp.setKeyInfo(keyInfo.getProtobuf(false, clientVersion));
 
     return resp.build();
   }
@@ -384,7 +386,7 @@ public class OzoneManagerRequestHandler implements RequestHandler {
     return resp.build();
   }
 
-  private ListKeysResponse listKeys(ListKeysRequest request)
+  private ListKeysResponse listKeys(ListKeysRequest request, int clientVersion)
       throws IOException {
     ListKeysResponse.Builder resp =
         ListKeysResponse.newBuilder();
@@ -396,14 +398,14 @@ public class OzoneManagerRequestHandler implements RequestHandler {
         request.getPrefix(),
         request.getCount());
     for (OmKeyInfo key : keys) {
-      resp.addKeyInfo(key.getProtobuf());
+      resp.addKeyInfo(key.getProtobuf(true, clientVersion));
     }
 
     return resp.build();
   }
 
-  private ListTrashResponse listTrash(ListTrashRequest request)
-      throws IOException {
+  private ListTrashResponse listTrash(ListTrashRequest request,
+      int clientVersion) throws IOException {
 
     ListTrashResponse.Builder resp =
         ListTrashResponse.newBuilder();
@@ -416,14 +418,14 @@ public class OzoneManagerRequestHandler implements RequestHandler {
         request.getMaxKeys());
 
     for (RepeatedOmKeyInfo key: deletedKeys) {
-      resp.addDeletedKeys(key.getProto());
+      resp.addDeletedKeys(key.getProto(false, clientVersion));
     }
 
     return resp.build();
   }
 
-  private AllocateBlockResponse allocateBlock(AllocateBlockRequest request)
-      throws IOException {
+  private AllocateBlockResponse allocateBlock(AllocateBlockRequest request,
+      int clientVersion) throws IOException {
     AllocateBlockResponse.Builder resp =
         AllocateBlockResponse.newBuilder();
 
@@ -438,7 +440,7 @@ public class OzoneManagerRequestHandler implements RequestHandler {
         request.getClientID(), ExcludeList.getFromProtoBuf(
             request.getExcludeList()));
 
-    resp.setKeyLocation(newLocation.getProtobuf());
+    resp.setKeyLocation(newLocation.getProtobuf(clientVersion));
 
     return resp.build();
   }
@@ -448,12 +450,23 @@ public class OzoneManagerRequestHandler implements RequestHandler {
     ServiceListResponse.Builder resp = ServiceListResponse.newBuilder();
 
     ServiceInfoEx serviceInfoEx = impl.getServiceInfo();
-    resp.addAllServiceInfo(serviceInfoEx.getServiceInfoList().stream()
-        .map(ServiceInfo::getProtobuf)
-        .collect(Collectors.toList()));
+
+    List<OzoneManagerProtocolProtos.ServiceInfo> serviceInfoProtos =
+        new ArrayList<>();
+    List<ServiceInfo> serviceInfos = serviceInfoEx.getServiceInfoList();
+    for (ServiceInfo info : serviceInfos) {
+      serviceInfoProtos.add(info.getProtobuf());
+    }
+
+    resp.addAllServiceInfo(serviceInfoProtos);
     if (serviceInfoEx.getCaCertificate() != null) {
       resp.setCaCertificate(serviceInfoEx.getCaCertificate());
     }
+
+    for (String ca : serviceInfoEx.getCaCertPemList()) {
+      resp.addCaCerts(ca);
+    }
+
     return resp.build();
   }
 
@@ -480,8 +493,13 @@ public class OzoneManagerRequestHandler implements RequestHandler {
 
     omPartInfoList.forEach(partInfo -> partInfoList.add(partInfo.getProto()));
 
-    response.setType(omMultipartUploadListParts.getReplicationType());
-    response.setFactor(omMultipartUploadListParts.getReplicationFactor());
+    response.setType(
+            omMultipartUploadListParts
+                    .getReplicationConfig()
+                    .getReplicationType());
+    response.setFactor(
+            ReplicationConfig.getLegacyFactor(
+                    omMultipartUploadListParts.getReplicationConfig()));
     response.setNextPartNumberMarker(
         omMultipartUploadListParts.getNextPartNumberMarker());
     response.setIsTruncated(omMultipartUploadListParts.isTruncated());
@@ -507,8 +525,10 @@ public class OzoneManagerRequestHandler implements RequestHandler {
             .setBucketName(upload.getBucketName())
             .setKeyName(upload.getKeyName())
             .setUploadId(upload.getUploadId())
-            .setType(upload.getReplicationType())
-            .setFactor(upload.getReplicationFactor())
+            .setType(upload.getReplicationConfig().getReplicationType())
+            .setFactor(
+                    ReplicationConfig.getLegacyFactor(
+                            upload.getReplicationConfig()))
             .setCreationTime(upload.getCreationTime().toEpochMilli())
             .build())
         .collect(Collectors.toList());
@@ -522,7 +542,7 @@ public class OzoneManagerRequestHandler implements RequestHandler {
   }
 
   private GetFileStatusResponse getOzoneFileStatus(
-      GetFileStatusRequest request) throws IOException {
+      GetFileStatusRequest request, int clientVersion) throws IOException {
     KeyArgs keyArgs = request.getKeyArgs();
     OmKeyArgs omKeyArgs = new OmKeyArgs.Builder()
         .setVolumeName(keyArgs.getVolumeName())
@@ -532,14 +552,13 @@ public class OzoneManagerRequestHandler implements RequestHandler {
         .build();
 
     GetFileStatusResponse.Builder rb = GetFileStatusResponse.newBuilder();
-    rb.setStatus(impl.getFileStatus(omKeyArgs).getProtobuf());
+    rb.setStatus(impl.getFileStatus(omKeyArgs).getProtobuf(clientVersion));
 
     return rb.build();
   }
 
-  private LookupFileResponse lookupFile(
-      LookupFileRequest request)
-      throws IOException {
+  private LookupFileResponse lookupFile(LookupFileRequest request,
+      int clientVersion) throws IOException {
     KeyArgs keyArgs = request.getKeyArgs();
     OmKeyArgs omKeyArgs = new OmKeyArgs.Builder()
         .setVolumeName(keyArgs.getVolumeName())
@@ -549,12 +568,12 @@ public class OzoneManagerRequestHandler implements RequestHandler {
         .setSortDatanodesInPipeline(keyArgs.getSortDatanodes())
         .build();
     return LookupFileResponse.newBuilder()
-        .setKeyInfo(impl.lookupFile(omKeyArgs).getProtobuf())
+        .setKeyInfo(impl.lookupFile(omKeyArgs).getProtobuf(clientVersion))
         .build();
   }
 
   private ListStatusResponse listStatus(
-      ListStatusRequest request) throws IOException {
+      ListStatusRequest request, int clientVersion) throws IOException {
     KeyArgs keyArgs = request.getKeyArgs();
     OmKeyArgs omKeyArgs = new OmKeyArgs.Builder()
         .setVolumeName(keyArgs.getVolumeName())
@@ -569,7 +588,7 @@ public class OzoneManagerRequestHandler implements RequestHandler {
         listStatusResponseBuilder =
         ListStatusResponse.newBuilder();
     for (OzoneFileStatus status : statuses) {
-      listStatusResponseBuilder.addStatuses(status.getProtobuf());
+      listStatusResponseBuilder.addStatuses(status.getProtobuf(clientVersion));
     }
     return listStatusResponseBuilder.build();
   }

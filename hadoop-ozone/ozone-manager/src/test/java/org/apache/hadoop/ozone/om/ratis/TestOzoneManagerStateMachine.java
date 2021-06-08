@@ -16,10 +16,17 @@
  */
 package org.apache.hadoop.ozone.om.ratis;
 
+import org.apache.hadoop.hdds.conf.OzoneConfiguration;
+import org.apache.hadoop.ozone.common.ha.ratis.RatisSnapshotInfo;
+import org.apache.hadoop.ozone.om.OMConfigKeys;
+import org.apache.hadoop.ozone.om.OMMetadataManager;
+import org.apache.hadoop.ozone.om.OmMetadataManagerImpl;
 import org.apache.hadoop.ozone.om.OzoneManager;
 import org.junit.Assert;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
 import org.mockito.Mockito;
 
 import java.util.ArrayList;
@@ -32,18 +39,30 @@ import static org.mockito.Mockito.when;
  */
 public class TestOzoneManagerStateMachine {
 
+  @Rule
+  public TemporaryFolder tempDir = new TemporaryFolder();
+
   private OzoneManagerStateMachine ozoneManagerStateMachine;
   @Before
-  public void setup() {
+  public void setup() throws Exception {
     OzoneManagerRatisServer ozoneManagerRatisServer =
         Mockito.mock(OzoneManagerRatisServer.class);
     OzoneManager ozoneManager = Mockito.mock(OzoneManager.class);
 
+    OzoneConfiguration conf = new OzoneConfiguration();
+    conf.set(OMConfigKeys.OZONE_OM_DB_DIRS,
+        tempDir.newFolder().getAbsolutePath().toString());
+
+    OMMetadataManager omMetadataManager = new OmMetadataManagerImpl(conf);
+
+    when(ozoneManager.getMetadataManager()).thenReturn(omMetadataManager);
+
     when(ozoneManagerRatisServer.getOzoneManager()).thenReturn(ozoneManager);
     when(ozoneManager.getSnapshotInfo()).thenReturn(
-        Mockito.mock(OMRatisSnapshotInfo.class));
+        Mockito.mock(RatisSnapshotInfo.class));
     ozoneManagerStateMachine =
         new OzoneManagerStateMachine(ozoneManagerRatisServer, false);
+    ozoneManagerStateMachine.notifyTermIndexUpdated(0, 0);
   }
 
   @Test
@@ -52,7 +71,7 @@ public class TestOzoneManagerStateMachine {
     // Happy scenario.
 
     // Conf/metadata transaction.
-    ozoneManagerStateMachine.notifyIndexUpdate(0, 1);
+    ozoneManagerStateMachine.notifyTermIndexUpdated(0, 1);
     Assert.assertEquals(0,
         ozoneManagerStateMachine.getLastAppliedTermIndex().getTerm());
     Assert.assertEquals(1,
@@ -76,7 +95,7 @@ public class TestOzoneManagerStateMachine {
         ozoneManagerStateMachine.getLastAppliedTermIndex().getIndex());
 
     // Conf/metadata transaction.
-    ozoneManagerStateMachine.notifyIndexUpdate(0L, 4L);
+    ozoneManagerStateMachine.notifyTermIndexUpdated(0L, 4L);
 
     Assert.assertEquals(0L,
         ozoneManagerStateMachine.getLastAppliedTermIndex().getTerm());
@@ -110,7 +129,7 @@ public class TestOzoneManagerStateMachine {
     // lastAppliedIndex as 4 or not.
 
     // Conf/metadata transaction.
-    ozoneManagerStateMachine.notifyIndexUpdate(0, 1);
+    ozoneManagerStateMachine.notifyTermIndexUpdated(0, 1);
     Assert.assertEquals(0,
         ozoneManagerStateMachine.getLastAppliedTermIndex().getTerm());
     Assert.assertEquals(1,
@@ -125,7 +144,7 @@ public class TestOzoneManagerStateMachine {
 
 
     // Conf/metadata transaction.
-    ozoneManagerStateMachine.notifyIndexUpdate(0L, 5L);
+    ozoneManagerStateMachine.notifyTermIndexUpdated(0L, 5L);
 
   // Still it should be zero, as for 2,3,4 updateLastAppliedIndex is not yet
     // called so the lastAppliedIndex will be at older value.

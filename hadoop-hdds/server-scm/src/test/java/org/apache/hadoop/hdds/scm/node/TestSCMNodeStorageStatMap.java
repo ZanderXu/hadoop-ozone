@@ -28,7 +28,7 @@ import org.apache.hadoop.hdds.scm.TestUtils;
 import org.apache.hadoop.hdds.scm.exceptions.SCMException;
 import org.apache.hadoop.ozone.OzoneConsts;
 import org.apache.hadoop.ozone.container.common.impl.StorageLocationReport;
-import org.apache.hadoop.test.GenericTestUtils;
+import org.apache.ozone.test.GenericTestUtils;
 import org.junit.*;
 import org.junit.Rule;
 import org.junit.rules.ExpectedException;
@@ -46,7 +46,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * Test Node Storage Map.
  */
 public class TestSCMNodeStorageStatMap {
-  private final static int DATANODE_COUNT = 100;
+  private static final int DATANODE_COUNT = 100;
   private final long capacity = 10L * OzoneConsts.GB;
   private final long used = 2L * OzoneConsts.GB;
   private final long remaining = capacity - used;

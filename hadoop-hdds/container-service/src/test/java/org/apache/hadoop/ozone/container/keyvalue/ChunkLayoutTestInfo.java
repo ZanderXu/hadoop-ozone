@@ -22,6 +22,7 @@ import org.apache.hadoop.ozone.container.common.impl.ChunkLayOutVersion;
 import org.apache.hadoop.ozone.container.keyvalue.impl.ChunkManagerDummyImpl;
 import org.apache.hadoop.ozone.container.keyvalue.impl.FilePerBlockStrategy;
 import org.apache.hadoop.ozone.container.keyvalue.impl.FilePerChunkStrategy;
+import org.apache.hadoop.ozone.container.keyvalue.interfaces.BlockManager;
 import org.apache.hadoop.ozone.container.keyvalue.interfaces.ChunkManager;
 
 import java.io.File;
@@ -40,7 +41,7 @@ public enum ChunkLayoutTestInfo {
 
   DUMMY {
     @Override
-    public ChunkManager createChunkManager(boolean sync) {
+    public ChunkManager createChunkManager(boolean sync, BlockManager manager) {
       return new ChunkManagerDummyImpl();
     }
 
@@ -61,8 +62,9 @@ public enum ChunkLayoutTestInfo {
   },
 
   FILE_PER_CHUNK {
-    public ChunkManager createChunkManager(boolean sync) {
-      return new FilePerChunkStrategy(sync);
+    @Override
+    public ChunkManager createChunkManager(boolean sync, BlockManager manager) {
+      return new FilePerChunkStrategy(sync, manager, null);
     }
 
     @Override
@@ -77,8 +79,9 @@ public enum ChunkLayoutTestInfo {
   },
 
   FILE_PER_BLOCK {
-    public ChunkManager createChunkManager(boolean sync) {
-      return new FilePerBlockStrategy(sync);
+    @Override
+    public ChunkManager createChunkManager(boolean sync, BlockManager manager) {
+      return new FilePerBlockStrategy(sync, null, null);
     }
 
     @Override
@@ -92,7 +95,8 @@ public enum ChunkLayoutTestInfo {
     }
   };
 
-  public abstract ChunkManager createChunkManager(boolean sync);
+  public abstract ChunkManager createChunkManager(boolean sync,
+      BlockManager manager);
 
   public abstract void validateFileCount(File dir, long blockCount,
       long chunkCount);

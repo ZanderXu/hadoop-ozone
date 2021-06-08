@@ -36,6 +36,8 @@ import org.apache.hadoop.ozone.client.VolumeArgs;
 import org.apache.commons.lang3.RandomStringUtils;
 import org.apache.hadoop.ozone.om.exceptions.OMException;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
+
 /**
  * Utility to help to generate test data.
  */
@@ -72,18 +74,25 @@ public final class TestDataUtil {
   }
 
   public static void createKey(OzoneBucket bucket, String keyName,
-      String content) throws IOException {
+                               String content) throws IOException {
+    createKey(bucket, keyName, ReplicationFactor.ONE,
+        ReplicationType.STAND_ALONE, content);
+  }
+
+  public static void createKey(OzoneBucket bucket, String keyName,
+      ReplicationFactor repFactor, ReplicationType repType, String content)
+      throws IOException {
     try (OutputStream stream = bucket
-        .createKey(keyName, content.length(), ReplicationType.STAND_ALONE,
-            ReplicationFactor.ONE, new HashMap<>())) {
-      stream.write(content.getBytes());
+        .createKey(keyName, content.length(), repType, repFactor,
+            new HashMap<>())) {
+      stream.write(content.getBytes(UTF_8));
     }
   }
 
   public static String getKey(OzoneBucket bucket, String keyName)
       throws IOException {
     try (InputStream stream = bucket.readKey(keyName)) {
-      return new Scanner(stream).useDelimiter("\\A").next();
+      return new Scanner(stream, UTF_8.name()).useDelimiter("\\A").next();
     }
   }
 

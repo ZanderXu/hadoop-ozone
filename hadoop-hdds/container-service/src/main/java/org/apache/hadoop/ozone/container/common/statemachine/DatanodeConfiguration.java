@@ -16,22 +16,41 @@
  */
 package org.apache.hadoop.ozone.container.common.statemachine;
 
-import javax.annotation.PostConstruct;
-
 import org.apache.hadoop.hdds.conf.Config;
 import org.apache.hadoop.hdds.conf.ConfigGroup;
-import static org.apache.hadoop.hdds.conf.ConfigTag.DATANODE;
 import org.apache.hadoop.hdds.conf.ConfigType;
+import org.apache.hadoop.hdds.conf.PostConstruct;
+import org.apache.hadoop.hdds.conf.ConfigTag;
+
+import static org.apache.hadoop.hdds.conf.ConfigTag.DATANODE;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.time.Duration;
 
 /**
  * Configuration class used for high level datanode configuration parameters.
  */
 @ConfigGroup(prefix = "hdds.datanode")
 public class DatanodeConfiguration {
-  static final Logger LOG =
+
+  private static final Logger LOG =
       LoggerFactory.getLogger(DatanodeConfiguration.class);
+
+  static final String REPLICATION_STREAMS_LIMIT_KEY =
+      "hdds.datanode.replication.streams.limit";
+  static final String CONTAINER_DELETE_THREADS_MAX_KEY =
+      "hdds.datanode.container.delete.threads.max";
+  static final String PERIODIC_DISK_CHECK_INTERVAL_MINUTES_KEY =
+      "hdds.datanode.periodic.disk.check.interval.minutes";
+  public static final String FAILED_VOLUMES_TOLERATED_KEY =
+      "hdds.datanode.failed.volumes.tolerated";
+
+  static final int REPLICATION_MAX_STREAMS_DEFAULT = 10;
+
+  static final long PERIODIC_DISK_CHECK_INTERVAL_MINUTES_DEFAULT = 15;
+
+  static final int FAILED_VOLUMES_TOLERATED_DEFAULT = -1;
 
   /**
    * The maximum number of replication commands a single datanode can execute
@@ -44,9 +63,10 @@ public class DatanodeConfiguration {
       description = "The maximum number of replication commands a single " +
           "datanode can execute simultaneously"
   )
-  private final int replicationMaxStreamsDefault = 10;
+  private int replicationMaxStreams = REPLICATION_MAX_STREAMS_DEFAULT;
 
-  private int replicationMaxStreams = replicationMaxStreamsDefault;
+  static final int CONTAINER_DELETE_THREADS_DEFAULT = 2;
+
   /**
    * The maximum number of threads used to delete containers on a datanode
    * simultaneously.
@@ -58,24 +78,96 @@ public class DatanodeConfiguration {
       description = "The maximum number of threads used to delete containers " +
           "on a datanode"
   )
-  private final int containerDeleteThreadsDefault = 2;
+  private int containerDeleteThreads = CONTAINER_DELETE_THREADS_DEFAULT;
 
-  private int containerDeleteThreads = containerDeleteThreadsDefault;
+  @Config(key = "block.deleting.service.interval",
+          defaultValue = "60s",
+          type = ConfigType.TIME,
+          tags = { ConfigTag.SCM, ConfigTag.DELETION },
+          description =
+                  "Time interval of the Datanode block deleting service. The "
+                          + "block deleting service runs on Datanode "
+                          + "periodically and deletes blocks queued for "
+                          + "deletion. Unit could be defined with "
+                          + "postfix (ns,ms,s,m,h,d). "
+  )
+  private long blockDeletionInterval = Duration.ofSeconds(60).toMillis();
+
+  public Duration getBlockDeletionInterval() {
+    return Duration.ofMillis(blockDeletionInterval);
+  }
+
+  public void setBlockDeletionInterval(Duration duration) {
+    this.blockDeletionInterval = duration.toMillis();
+  }
+
+  @Config(key = "block.deleting.limit.per.interval",
+      defaultValue = "5000",
+      type = ConfigType.INT,
+      tags = { ConfigTag.SCM, ConfigTag.DELETION },
+      description =
+          "Number of blocks to be deleted in an interval."
+  )
+  private int blockLimitPerInterval = 5000;
+
+  public int getBlockDeletionLimit() {
+    return blockLimitPerInterval;
+  }
+
+  public void setBlockDeletionLimit(int limit) {
+    this.blockLimitPerInterval = limit;
+  }
+
+  @Config(key = "periodic.disk.check.interval.minutes",
+      defaultValue = "15",
+      type = ConfigType.LONG,
+      tags = { DATANODE },
+      description = "Periodic disk check run interval in minutes."
+  )
+  private long periodicDiskCheckIntervalMinutes =
+      PERIODIC_DISK_CHECK_INTERVAL_MINUTES_DEFAULT;
+
+  @Config(key = "failed.volumes.tolerated",
+      defaultValue = "-1",
+      type = ConfigType.INT,
+      tags = { DATANODE },
+      description = "The number of volumes that are allowed to fail "
+          + "before a datanode stops offering service. "
+          + "Config this to -1 means unlimited, but we should have "
+          + "at least one good volume left."
+  )
+  private int failedVolumesTolerated = FAILED_VOLUMES_TOLERATED_DEFAULT;
 
   @PostConstruct
   public void validate() {
-    if (replicationMaxStreamsDefault < 1) {
-      LOG.warn("hdds.datanode.replication.streams.limit must be greater than" +
-          "zero and was set to {}. Defaulting to {}",
-          replicationMaxStreamsDefault, replicationMaxStreamsDefault);
-      replicationMaxStreams = replicationMaxStreamsDefault;
+    if (replicationMaxStreams < 1) {
+      LOG.warn(REPLICATION_STREAMS_LIMIT_KEY + " must be greater than zero " +
+              "and was set to {}. Defaulting to {}",
+          replicationMaxStreams, REPLICATION_MAX_STREAMS_DEFAULT);
+      replicationMaxStreams = REPLICATION_MAX_STREAMS_DEFAULT;
     }
 
     if (containerDeleteThreads < 1) {
-      LOG.warn("hdds.datanode.container.delete.threads.max must be greater " +
-              "than zero and was set to {}. Defaulting to {}",
-          containerDeleteThreads, containerDeleteThreadsDefault);
-      containerDeleteThreads = containerDeleteThreadsDefault;
+      LOG.warn(CONTAINER_DELETE_THREADS_MAX_KEY + " must be greater than zero" +
+              " and was set to {}. Defaulting to {}",
+          containerDeleteThreads, CONTAINER_DELETE_THREADS_DEFAULT);
+      containerDeleteThreads = CONTAINER_DELETE_THREADS_DEFAULT;
+    }
+
+    if (periodicDiskCheckIntervalMinutes < 1) {
+      LOG.warn(PERIODIC_DISK_CHECK_INTERVAL_MINUTES_KEY +
+              " must be greater than zero and was set to {}. Defaulting to {}",
+          periodicDiskCheckIntervalMinutes,
+          PERIODIC_DISK_CHECK_INTERVAL_MINUTES_DEFAULT);
+      periodicDiskCheckIntervalMinutes =
+          PERIODIC_DISK_CHECK_INTERVAL_MINUTES_DEFAULT;
+    }
+
+    if (failedVolumesTolerated < -1) {
+      LOG.warn(FAILED_VOLUMES_TOLERATED_KEY +
+          "must be greater than -1 and was set to {}. Defaulting to {}",
+          failedVolumesTolerated, FAILED_VOLUMES_TOLERATED_DEFAULT);
+      failedVolumesTolerated = FAILED_VOLUMES_TOLERATED_DEFAULT;
     }
   }
 
@@ -95,4 +187,20 @@ public class DatanodeConfiguration {
     return containerDeleteThreads;
   }
 
+  public long getPeriodicDiskCheckIntervalMinutes() {
+    return periodicDiskCheckIntervalMinutes;
+  }
+
+  public void setPeriodicDiskCheckIntervalMinutes(
+      long periodicDiskCheckIntervalMinutes) {
+    this.periodicDiskCheckIntervalMinutes = periodicDiskCheckIntervalMinutes;
+  }
+
+  public int getFailedVolumesTolerated() {
+    return failedVolumesTolerated;
+  }
+
+  public void setFailedVolumesTolerated(int failedVolumesTolerated) {
+    this.failedVolumesTolerated = failedVolumesTolerated;
+  }
 }

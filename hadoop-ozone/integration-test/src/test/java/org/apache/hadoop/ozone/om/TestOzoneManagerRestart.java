@@ -32,20 +32,20 @@ import org.apache.hadoop.ozone.client.OzoneClient;
 import org.apache.hadoop.ozone.client.OzoneKey;
 import org.apache.hadoop.ozone.client.OzoneVolume;
 import org.apache.hadoop.ozone.client.io.OzoneOutputStream;
-import org.apache.hadoop.test.GenericTestUtils;
+import org.apache.ozone.test.GenericTestUtils;
 
 import org.apache.commons.lang3.RandomStringUtils;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_RATIS_PIPELINE_LIMIT;
 import static org.apache.hadoop.ozone.OzoneConfigKeys.OZONE_ACL_ENABLED;
 import static org.apache.hadoop.ozone.OzoneConfigKeys.OZONE_ADMINISTRATORS;
 import static org.apache.hadoop.ozone.OzoneConfigKeys.OZONE_ADMINISTRATORS_WILDCARD;
 import static org.apache.hadoop.ozone.OzoneConfigKeys.OZONE_OPEN_KEY_EXPIRE_THRESHOLD_SECONDS;
-import org.junit.After;
+import org.junit.AfterClass;
 import org.junit.Assert;
 import static org.junit.Assert.fail;
-import org.junit.Before;
-import org.junit.Ignore;
+import org.junit.BeforeClass;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.Timeout;
@@ -54,16 +54,15 @@ import org.junit.rules.Timeout;
  * Test some client operations after cluster starts. And perform restart and
  * then performs client operations and check the behavior is expected or not.
  */
-@Ignore
 public class TestOzoneManagerRestart {
-  private MiniOzoneCluster cluster = null;
-  private OzoneConfiguration conf;
-  private String clusterId;
-  private String scmId;
-  private String omId;
+  private static MiniOzoneCluster cluster = null;
+  private static OzoneConfiguration conf;
+  private static String clusterId;
+  private static String scmId;
+  private static String omId;
 
   @Rule
-  public Timeout timeout = new Timeout(60000);
+  public Timeout timeout = Timeout.seconds(240);
 
   /**
    * Create a MiniDFSCluster for testing.
@@ -72,8 +71,8 @@ public class TestOzoneManagerRestart {
    *
    * @throws IOException
    */
-  @Before
-  public void init() throws Exception {
+  @BeforeClass
+  public static void init() throws Exception {
     conf = new OzoneConfiguration();
     clusterId = UUID.randomUUID().toString();
     scmId = UUID.randomUUID().toString();
@@ -94,8 +93,8 @@ public class TestOzoneManagerRestart {
   /**
    * Shutdown MiniDFSCluster.
    */
-  @After
-  public void shutdown() {
+  @AfterClass
+  public static void shutdown() {
     if (cluster != null) {
       cluster.shutdown();
     }
@@ -106,7 +105,6 @@ public class TestOzoneManagerRestart {
     String volumeName = "volume" + RandomStringUtils.randomNumeric(5);
 
     OzoneClient client = cluster.getClient();
-
     ObjectStore objectStore = client.getObjectStore();
 
     objectStore.createVolume(volumeName);
@@ -194,7 +192,7 @@ public class TestOzoneManagerRestart {
         data.length(), ReplicationType.RATIS, ReplicationFactor.ONE,
         new HashMap<>());
 
-    ozoneOutputStream.write(data.getBytes(), 0, data.length());
+    ozoneOutputStream.write(data.getBytes(UTF_8), 0, data.length());
     ozoneOutputStream.close();
 
     cluster.restartOzoneManager();
@@ -210,6 +208,4 @@ public class TestOzoneManagerRestart {
     Assert.assertTrue(ozoneKey.getReplicationType().equals(
         ReplicationType.RATIS));
   }
-
-
 }

@@ -29,7 +29,7 @@ import org.apache.hadoop.ozone.client.OzoneVolume;
 import org.apache.hadoop.ozone.client.io.OzoneOutputStream;
 import org.apache.hadoop.ozone.container.ContainerTestHelper;
 import org.apache.hadoop.ozone.container.TestHelper;
-import org.apache.hadoop.test.GenericTestUtils;
+import org.apache.ozone.test.GenericTestUtils;
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
@@ -56,11 +56,11 @@ public class TestKeyPurging {
     * Set a timeout for each test.
     */
   @Rule
-  public Timeout timeout = new Timeout(300000);
+  public Timeout timeout = Timeout.seconds(300);
 
-  private static MiniOzoneCluster cluster;
-  private static ObjectStore store;
-  private static OzoneManager om;
+  private MiniOzoneCluster cluster;
+  private ObjectStore store;
+  private OzoneManager om;
 
   private static final int NUM_KEYS = 10;
   private static final int KEY_SIZE = 100;

@@ -16,6 +16,7 @@
  */
 package org.apache.hadoop.ozone.container.common.statemachine;
 
+import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import org.apache.hadoop.hdds.conf.ConfigurationSource;
 import org.apache.hadoop.ozone.protocol.VersionResponse;
 import org.apache.hadoop.ozone.protocolPB
@@ -27,6 +28,8 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.time.ZonedDateTime;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.Lock;
@@ -51,6 +54,7 @@ public class EndpointStateMachine
   private VersionResponse version;
   private ZonedDateTime lastSuccessfulHeartbeat;
   private boolean isPassive;
+  private final ExecutorService executorService;
 
   /**
    * Constructs RPC Endpoints.
@@ -66,6 +70,11 @@ public class EndpointStateMachine
     state = EndPointStates.getInitState();
     lock = new ReentrantLock();
     this.conf = conf;
+    executorService = Executors.newSingleThreadExecutor(
+        new ThreadFactoryBuilder()
+            .setNameFormat("EndpointStateMachine task thread for "
+                + this.address + " - %d ")
+            .build());
   }
 
   /**
@@ -93,7 +102,7 @@ public class EndpointStateMachine
   }
 
   /**
-   * Sets the Version reponse we recieved from the SCM.
+   * Sets the Version response we received from the SCM.
    *
    * @param version VersionResponse
    */
@@ -106,6 +115,7 @@ public class EndpointStateMachine
    *
    * @return - getState.
    */
+  @Override
   public EndPointStates getState() {
     return state;
   }
@@ -127,6 +137,13 @@ public class EndpointStateMachine
   public EndPointStates setState(EndPointStates epState) {
     this.state = epState;
     return this.state;
+  }
+
+  /**
+   * Returns the endpoint specific ExecutorService.
+   */
+  public ExecutorService getExecutorService() {
+    return executorService;
   }
 
   /**
@@ -155,6 +172,7 @@ public class EndpointStateMachine
    *
    * @return int
    */
+  @Override
   public long getMissedCount() {
     return this.missedCount.get();
   }
@@ -192,6 +210,7 @@ public class EndpointStateMachine
    *
    * @return - String
    */
+  @Override
   public String toString() {
     return address.toString();
   }
@@ -311,6 +330,7 @@ public class EndpointStateMachine
     }
   }
 
+  @Override
   public long getLastSuccessfulHeartbeat() {
     return lastSuccessfulHeartbeat == null ?
         0 :

@@ -85,7 +85,7 @@ public final class OMConfigKeys {
 
   public static final String OZONE_KEY_DELETING_LIMIT_PER_TASK =
       "ozone.key.deleting.limit.per.task";
-  public static final int OZONE_KEY_DELETING_LIMIT_PER_TASK_DEFAULT = 1000;
+  public static final int OZONE_KEY_DELETING_LIMIT_PER_TASK_DEFAULT = 20000;
 
   public static final String OZONE_OM_METRICS_SAVE_INTERVAL =
       "ozone.om.save.metrics.interval";
@@ -97,7 +97,7 @@ public final class OMConfigKeys {
   public static final String OZONE_OM_RATIS_ENABLE_KEY
       = "ozone.om.ratis.enable";
   public static final boolean OZONE_OM_RATIS_ENABLE_DEFAULT
-      = false;
+      = true;
   public static final String OZONE_OM_RATIS_PORT_KEY
       = "ozone.om.ratis.port";
   public static final int OZONE_OM_RATIS_PORT_DEFAULT
@@ -113,11 +113,11 @@ public final class OMConfigKeys {
   public static final String OZONE_OM_RATIS_SEGMENT_SIZE_KEY
       = "ozone.om.ratis.segment.size";
   public static final String OZONE_OM_RATIS_SEGMENT_SIZE_DEFAULT
-      = "16KB";
+      = "4MB";
   public static final String OZONE_OM_RATIS_SEGMENT_PREALLOCATED_SIZE_KEY
       = "ozone.om.ratis.segment.preallocated.size";
   public static final String OZONE_OM_RATIS_SEGMENT_PREALLOCATED_SIZE_DEFAULT
-      = "16KB";
+      = "4MB";
 
   // OM Ratis Log Appender configurations
   public static final String
@@ -133,12 +133,10 @@ public final class OMConfigKeys {
       "ozone.om.ratis.log.purge.gap";
   public static final int OZONE_OM_RATIS_LOG_PURGE_GAP_DEFAULT = 1000000;
 
-  // OM Snapshot configurations
   public static final String OZONE_OM_RATIS_SNAPSHOT_AUTO_TRIGGER_THRESHOLD_KEY
       = "ozone.om.ratis.snapshot.auto.trigger.threshold";
   public static final long
-      OZONE_OM_RATIS_SNAPSHOT_AUTO_TRIGGER_THRESHOLD_DEFAULT
-      = 400000;
+      OZONE_OM_RATIS_SNAPSHOT_AUTO_TRIGGER_THRESHOLD_DEFAULT = 400000;
 
   // OM Ratis server configurations
   public static final String OZONE_OM_RATIS_SERVER_REQUEST_TIMEOUT_KEY
@@ -155,27 +153,13 @@ public final class OMConfigKeys {
   public static final String OZONE_OM_RATIS_MINIMUM_TIMEOUT_KEY
       = "ozone.om.ratis.minimum.timeout";
   public static final TimeDuration OZONE_OM_RATIS_MINIMUM_TIMEOUT_DEFAULT
-      = TimeDuration.valueOf(1, TimeUnit.SECONDS);
+      = TimeDuration.valueOf(5, TimeUnit.SECONDS);
 
-  // OM Ratis Leader Election configurations
-  public static final String
-      OZONE_OM_LEADER_ELECTION_MINIMUM_TIMEOUT_DURATION_KEY =
-      "ozone.om.leader.election.minimum.timeout.duration";
-  public static final TimeDuration
-      OZONE_OM_LEADER_ELECTION_MINIMUM_TIMEOUT_DURATION_DEFAULT =
-      TimeDuration.valueOf(1, TimeUnit.SECONDS);
   public static final String OZONE_OM_RATIS_SERVER_FAILURE_TIMEOUT_DURATION_KEY
       = "ozone.om.ratis.server.failure.timeout.duration";
   public static final TimeDuration
       OZONE_OM_RATIS_SERVER_FAILURE_TIMEOUT_DURATION_DEFAULT
       = TimeDuration.valueOf(120, TimeUnit.SECONDS);
-
-  // OM Leader server role check interval
-  public static final String OZONE_OM_RATIS_SERVER_ROLE_CHECK_INTERVAL_KEY
-      = "ozone.om.ratis.server.role.check.interval";
-  public static final TimeDuration
-      OZONE_OM_RATIS_SERVER_ROLE_CHECK_INTERVAL_DEFAULT
-      = TimeDuration.valueOf(15, TimeUnit.SECONDS);
 
   // OM SnapshotProvider configurations
   public static final String OZONE_OM_RATIS_SNAPSHOT_DIR =
@@ -236,4 +220,28 @@ public final class OMConfigKeys {
   // hadoop-policy.xml, "*" allows all users/groups to access.
   public static final String OZONE_OM_SECURITY_CLIENT_PROTOCOL_ACL =
       "ozone.om.security.client.protocol.acl";
+
+  public static final String OZONE_OM_KEYNAME_CHARACTER_CHECK_ENABLED_KEY =
+          "ozone.om.keyname.character.check.enabled";
+  public static final boolean OZONE_OM_KEYNAME_CHARACTER_CHECK_ENABLED_DEFAULT =
+          false;
+
+  // This config needs to be enabled, when S3G created objects used via
+  // FileSystem API.
+  public static final String OZONE_OM_ENABLE_FILESYSTEM_PATHS =
+      "ozone.om.enable.filesystem.paths";
+  public static final boolean OZONE_OM_ENABLE_FILESYSTEM_PATHS_DEFAULT =
+      false;
+
+  public static final String OZONE_OM_HA_PREFIX = "ozone.om.ha";
+
+  public static final String OZONE_FS_TRASH_INTERVAL_KEY =
+      "ozone.fs.trash.interval";
+
+  public static final long  OZONE_FS_TRASH_INTERVAL_DEFAULT = 0;
+
+  public static final String OZONE_FS_TRASH_CHECKPOINT_INTERVAL_KEY =
+      "ozone.fs.trash.checkpoint.interval";
+
+  public static final long  OZONE_FS_TRASH_CHECKPOINT_INTERVAL_DEFAULT = 0;
 }

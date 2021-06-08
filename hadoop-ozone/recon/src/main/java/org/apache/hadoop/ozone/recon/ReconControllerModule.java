@@ -17,10 +17,12 @@
  */
 package org.apache.hadoop.ozone.recon;
 
+import java.io.File;
 import java.io.IOException;
 import java.lang.reflect.Constructor;
 import java.util.List;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.hadoop.hdds.conf.OzoneConfiguration;
 import org.apache.hadoop.hdds.scm.protocol.StorageContainerLocationProtocol;
 import org.apache.hadoop.hdds.scm.server.OzoneStorageContainerManager;
@@ -30,7 +32,7 @@ import org.apache.hadoop.ozone.om.protocol.OzoneManagerProtocol;
 import org.apache.hadoop.ozone.om.protocolPB.OmTransport;
 import org.apache.hadoop.ozone.om.protocolPB.OmTransportFactory;
 import org.apache.hadoop.ozone.om.protocolPB.OzoneManagerProtocolClientSideTranslatorPB;
-import org.apache.hadoop.ozone.recon.persistence.ContainerSchemaManager;
+import org.apache.hadoop.ozone.recon.persistence.ContainerHealthSchemaManager;
 import org.apache.hadoop.ozone.recon.persistence.DataSourceConfiguration;
 import org.apache.hadoop.ozone.recon.persistence.JooqPersistenceModule;
 import org.apache.hadoop.ozone.recon.recovery.ReconOMMetadataManager;
@@ -45,6 +47,7 @@ import org.apache.hadoop.ozone.recon.spi.impl.ReconContainerDBProvider;
 import org.apache.hadoop.ozone.recon.spi.impl.StorageContainerServiceProviderImpl;
 import org.apache.hadoop.ozone.recon.tasks.ContainerKeyMapperTask;
 import org.apache.hadoop.ozone.recon.tasks.FileSizeCountTask;
+import org.apache.hadoop.ozone.recon.tasks.TableCountTask;
 import org.apache.hadoop.ozone.recon.tasks.ReconOmTask;
 import org.apache.hadoop.ozone.recon.tasks.ReconTaskController;
 import org.apache.hadoop.ozone.recon.tasks.ReconTaskControllerImpl;
@@ -56,15 +59,16 @@ import com.google.inject.Provides;
 import com.google.inject.Singleton;
 import com.google.inject.multibindings.Multibinder;
 import static org.apache.hadoop.hdds.scm.cli.ContainerOperationClient.newContainerRpcClient;
-import static org.apache.hadoop.ozone.om.OMConfigKeys.OZONE_OM_INTERNAL_SERVICE_ID;
+import static org.apache.hadoop.ozone.OmUtils.getOzoneManagerServiceId;
+import static org.apache.hadoop.ozone.recon.ReconServerConfigKeys.OZONE_RECON_DB_DIR;
+
 import org.apache.ratis.protocol.ClientId;
 import org.hadoop.ozone.recon.codegen.ReconSqlDbConfig;
 import org.hadoop.ozone.recon.schema.tables.daos.ClusterGrowthDailyDao;
-import org.hadoop.ozone.recon.schema.tables.daos.ContainerHistoryDao;
 import org.hadoop.ozone.recon.schema.tables.daos.FileCountBySizeDao;
 import org.hadoop.ozone.recon.schema.tables.daos.GlobalStatsDao;
-import org.hadoop.ozone.recon.schema.tables.daos.MissingContainersDao;
 import org.hadoop.ozone.recon.schema.tables.daos.ReconTaskStatusDao;
+import org.hadoop.ozone.recon.schema.tables.daos.UnhealthyContainersDao;
 import org.jooq.Configuration;
 import org.jooq.DAO;
 import org.slf4j.Logger;
@@ -87,7 +91,7 @@ public class ReconControllerModule extends AbstractModule {
         .to(ReconOmMetadataManagerImpl.class);
     bind(OMMetadataManager.class).to(ReconOmMetadataManagerImpl.class);
 
-    bind(ContainerSchemaManager.class).in(Singleton.class);
+    bind(ContainerHealthSchemaManager.class).in(Singleton.class);
     bind(ContainerDBServiceProvider.class)
         .to(ContainerDBServiceProviderImpl.class).in(Singleton.class);
     bind(OzoneManagerServiceProvider.class)
@@ -106,6 +110,7 @@ public class ReconControllerModule extends AbstractModule {
         .to(StorageContainerServiceProviderImpl.class).in(Singleton.class);
     bind(OzoneStorageContainerManager.class)
         .to(ReconStorageContainerManagerFacade.class).in(Singleton.class);
+    bind(MetricsServiceProviderFactory.class).in(Singleton.class);
   }
 
   static class ReconOmTaskBindingModule extends AbstractModule {
@@ -115,6 +120,7 @@ public class ReconControllerModule extends AbstractModule {
           Multibinder.newSetBinder(binder(), ReconOmTask.class);
       taskBinder.addBinding().to(ContainerKeyMapperTask.class);
       taskBinder.addBinding().to(FileSizeCountTask.class);
+      taskBinder.addBinding().to(TableCountTask.class);
     }
   }
 
@@ -126,17 +132,17 @@ public class ReconControllerModule extends AbstractModule {
         ImmutableList.of(
             FileCountBySizeDao.class,
             ReconTaskStatusDao.class,
-            MissingContainersDao.class,
+            UnhealthyContainersDao.class,
             GlobalStatsDao.class,
-            ClusterGrowthDailyDao.class,
-            ContainerHistoryDao.class);
+            ClusterGrowthDailyDao.class);
 
     @Override
     protected void configure() {
       RECON_DAO_LIST.forEach(aClass -> {
         try {
           bind(aClass).toConstructor(
-              (Constructor) aClass.getConstructor(Configuration.class));
+              (Constructor) aClass.getConstructor(Configuration.class))
+              .in(Singleton.class);
         } catch (NoSuchMethodException e) {
           LOG.error("Error creating DAO {} ", aClass.getSimpleName(), e);
         }
@@ -151,11 +157,10 @@ public class ReconControllerModule extends AbstractModule {
     try {
       ClientId clientId = ClientId.randomId();
       UserGroupInformation ugi = UserGroupInformation.getCurrentUser();
+      String serviceId = getOzoneManagerServiceId(ozoneConfiguration);
       OmTransport transport =
-          OmTransportFactory.create(ozoneConfiguration, ugi,
-              ozoneConfiguration.get(OZONE_OM_INTERNAL_SERVICE_ID));
-      ozoneManagerClient = new
-          OzoneManagerProtocolClientSideTranslatorPB(
+          OmTransportFactory.create(ozoneConfiguration, ugi, serviceId);
+      ozoneManagerClient = new OzoneManagerProtocolClientSideTranslatorPB(
           transport, clientId.toString());
     } catch (IOException ioEx) {
       LOG.error("Error in provisioning OzoneManagerProtocol ", ioEx);
@@ -167,11 +172,7 @@ public class ReconControllerModule extends AbstractModule {
   StorageContainerLocationProtocol getSCMProtocol(
       final OzoneConfiguration configuration) {
     StorageContainerLocationProtocol storageContainerLocationProtocol = null;
-    try {
-      storageContainerLocationProtocol = newContainerRpcClient(configuration);
-    } catch (IOException e) {
-      LOG.error("Error in provisioning StorageContainerLocationProtocol ", e);
-    }
+    storageContainerLocationProtocol = newContainerRpcClient(configuration);
     return storageContainerLocationProtocol;
   }
 
@@ -181,6 +182,14 @@ public class ReconControllerModule extends AbstractModule {
 
     ReconSqlDbConfig sqlDbConfig =
         ozoneConfiguration.getObject(ReconSqlDbConfig.class);
+
+    if (StringUtils.contains(sqlDbConfig.getJdbcUrl(), OZONE_RECON_DB_DIR)) {
+      ReconUtils reconUtils = new ReconUtils();
+      File reconDbDir =
+          reconUtils.getReconDbDir(ozoneConfiguration, OZONE_RECON_DB_DIR);
+      sqlDbConfig.setJdbcUrl(
+          "jdbc:derby:" + reconDbDir.getPath() + "/ozone_recon_derby.db");
+    }
 
     return new DataSourceConfiguration() {
       @Override

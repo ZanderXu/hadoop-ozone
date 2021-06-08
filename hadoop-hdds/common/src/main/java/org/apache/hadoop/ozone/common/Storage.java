@@ -48,6 +48,7 @@ public abstract class Storage {
   public static final String STORAGE_DIR_CURRENT = "current";
   protected static final String STORAGE_FILE_VERSION = "VERSION";
   public static final String CONTAINER_DIR = "containerDir";
+  private static final int LAYOUT_VERSION = 0;
 
   private final NodeType nodeType;
   private final File root;
@@ -74,7 +75,7 @@ public abstract class Storage {
       this.storageInfo = new StorageInfo(type, getVersionFile());
     } else {
       this.storageInfo = new StorageInfo(
-          nodeType, StorageInfo.newClusterID(), Time.now());
+          nodeType, StorageInfo.newClusterID(), Time.now(), LAYOUT_VERSION);
       setNodeProperties();
     }
   }
@@ -116,6 +117,10 @@ public abstract class Storage {
     }
   }
 
+  public int getLayoutVersion() {
+    return storageInfo.getLayoutVersion();
+  }
+
   /**
    * Retrieves the storageInfo instance to read/write the common
    * version file properties.
@@ -125,7 +130,7 @@ public abstract class Storage {
     return storageInfo;
   }
 
-  abstract protected Properties getNodeProperties();
+  protected abstract Properties getNodeProperties();
 
   /**
    * Sets the Node properties specific to OM/SCM.
@@ -163,7 +168,7 @@ public abstract class Storage {
    *
    * @return the version file path
    */
-  private File getVersionFile() {
+  public File getVersionFile() {
     return new File(getCurrentDir(), STORAGE_FILE_VERSION);
   }
 
@@ -243,6 +248,18 @@ public abstract class Storage {
       throw new IOException("Cannot create directory " + getCurrentDir());
     }
     storageInfo.writeTo(getVersionFile());
+  }
+
+  /**
+   * Creates the Version file even if it exists.
+   * @throws IOException
+   */
+  public void forceInitialize() throws IOException {
+    if (state != StorageState.INITIALIZED) {
+      initialize();
+    } else {
+      storageInfo.writeTo(getVersionFile());
+    }
   }
 
   /**

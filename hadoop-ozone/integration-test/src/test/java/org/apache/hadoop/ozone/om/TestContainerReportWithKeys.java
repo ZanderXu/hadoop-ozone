@@ -20,9 +20,12 @@ import org.apache.commons.lang3.RandomStringUtils;
 
 import org.apache.hadoop.hdds.client.ReplicationFactor;
 import org.apache.hadoop.hdds.client.ReplicationType;
+import org.apache.hadoop.hdds.client.StandaloneReplicationConfig;
 import org.apache.hadoop.hdds.conf.OzoneConfiguration;
 import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
+import org.apache.hadoop.hdds.scm.container.ContainerID;
 import org.apache.hadoop.hdds.scm.container.ContainerInfo;
+import org.apache.hadoop.hdds.scm.container.ContainerReplica;
 import org.apache.hadoop.ozone.MiniOzoneCluster;
 import org.apache.hadoop.ozone.client.*;
 import org.apache.hadoop.ozone.client.io.OzoneOutputStream;
@@ -32,6 +35,7 @@ import org.apache.hadoop.ozone.om.helpers.OmKeyArgs;
 import org.apache.hadoop.ozone.om.helpers.OmKeyLocationInfo;
 import org.apache.hadoop.hdds.scm.server.StorageContainerManager;
 import org.junit.AfterClass;
+import org.junit.Assert;
 import org.junit.BeforeClass;
 import org.junit.Rule;
 import org.junit.Test;
@@ -42,6 +46,9 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.HashMap;
+import java.util.Set;
+
+import static java.nio.charset.StandardCharsets.UTF_8;
 
 /**
  * This class tests container report with DN container state info.
@@ -52,7 +59,7 @@ public class TestContainerReportWithKeys {
     * Set a timeout for each test.
     */
   @Rule
-  public Timeout timeout = new Timeout(300000);
+  public Timeout timeout = Timeout.seconds(300);
   private static final Logger LOG = LoggerFactory.getLogger(
       TestContainerReportWithKeys.class);
   private static MiniOzoneCluster cluster = null;
@@ -103,15 +110,16 @@ public class TestContainerReportWithKeys {
             .createKey(keyName, keySize, ReplicationType.STAND_ALONE,
                 ReplicationFactor.ONE, new HashMap<>());
     String dataString = RandomStringUtils.randomAlphabetic(keySize);
-    key.write(dataString.getBytes());
+    key.write(dataString.getBytes(UTF_8));
     key.close();
 
     OmKeyArgs keyArgs = new OmKeyArgs.Builder()
         .setVolumeName(volumeName)
         .setBucketName(bucketName)
         .setKeyName(keyName)
-        .setType(HddsProtos.ReplicationType.STAND_ALONE)
-        .setFactor(HddsProtos.ReplicationFactor.ONE).setDataSize(keySize)
+        .setReplicationConfig(
+            new StandaloneReplicationConfig(HddsProtos.ReplicationFactor.ONE))
+        .setDataSize(keySize)
         .setRefreshPipeline(true)
         .build();
 
@@ -122,6 +130,12 @@ public class TestContainerReportWithKeys {
 
 
     ContainerInfo cinfo = scm.getContainerInfo(keyInfo.getContainerID());
+    Set<ContainerReplica> replicas =
+        scm.getContainerManager().getContainerReplicas(
+            ContainerID.valueOf(keyInfo.getContainerID()));
+    Assert.assertTrue(replicas.size() == 1);
+    replicas.stream().forEach(rp ->
+        Assert.assertTrue(rp.getDatanodeDetails().getParent() != null));
 
     LOG.info("SCM Container Info keyCount: {} usedBytes: {}",
         cinfo.getNumberOfKeys(), cinfo.getUsedBytes());

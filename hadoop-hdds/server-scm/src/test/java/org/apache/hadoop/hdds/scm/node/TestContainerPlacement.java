@@ -36,21 +36,21 @@ import org.apache.hadoop.hdds.scm.container.ContainerInfo;
 import org.apache.hadoop.hdds.scm.container.SCMContainerManager;
 import org.apache.hadoop.hdds.scm.container.placement.algorithms.SCMContainerPlacementCapacity;
 import org.apache.hadoop.hdds.scm.events.SCMEvents;
-import org.apache.hadoop.hdds.scm.metadata.SCMDBDefinition;
+import org.apache.hadoop.hdds.scm.ha.MockSCMHAManager;
+import org.apache.hadoop.hdds.scm.ha.SCMContext;
+import org.apache.hadoop.hdds.scm.ha.SCMServiceManager;
+import org.apache.hadoop.hdds.scm.metadata.SCMMetadataStore;
+import org.apache.hadoop.hdds.scm.metadata.SCMMetadataStoreImpl;
 import org.apache.hadoop.hdds.scm.pipeline.PipelineManager;
-import org.apache.hadoop.hdds.scm.pipeline.SCMPipelineManager;
+import org.apache.hadoop.hdds.scm.pipeline.PipelineManagerV2Impl;
 import org.apache.hadoop.hdds.scm.server.SCMStorageConfig;
 import org.apache.hadoop.hdds.server.events.EventQueue;
-import org.apache.hadoop.hdds.utils.db.DBStore;
-import org.apache.hadoop.hdds.utils.db.DBStoreBuilder;
 import org.apache.hadoop.ozone.OzoneConsts;
 import org.apache.hadoop.ozone.container.common.SCMTestUtils;
 import org.apache.hadoop.test.PathUtils;
 
 import org.apache.commons.io.IOUtils;
 import static org.apache.hadoop.hdds.protocol.proto.HddsProtos.NodeState.HEALTHY;
-import static org.apache.hadoop.hdds.scm.metadata.SCMDBDefinition.CONTAINERS;
-import static org.apache.hadoop.hdds.scm.metadata.SCMDBDefinition.PIPELINES;
 import org.junit.After;
 import static org.junit.Assert.assertEquals;
 import org.junit.Before;
@@ -67,17 +67,16 @@ public class TestContainerPlacement {
 
   @Rule
   public ExpectedException thrown = ExpectedException.none();
-  private DBStore dbStore;
+  private SCMMetadataStore scmMetadataStore;
 
   @Before
   public void createDbStore() throws IOException {
-    dbStore =
-        DBStoreBuilder.createDBStore(getConf(), new SCMDBDefinition());
+    scmMetadataStore = new SCMMetadataStoreImpl(getConf());
   }
 
   @After
   public void destroyDBStore() throws Exception {
-    dbStore.close();
+    scmMetadataStore.getStore().close();
   }
   /**
    * Returns a new copy of Configuration.
@@ -110,7 +109,7 @@ public class TestContainerPlacement {
     Mockito.when(storageConfig.getClusterID()).thenReturn("cluster1");
 
     SCMNodeManager nodeManager = new SCMNodeManager(config,
-        storageConfig, eventQueue, null);
+        storageConfig, eventQueue, null, SCMContext.emptyContext());
     return nodeManager;
   }
 
@@ -119,10 +118,17 @@ public class TestContainerPlacement {
     EventQueue eventQueue = new EventQueue();
 
     PipelineManager pipelineManager =
-        new SCMPipelineManager(config, scmNodeManager,
-            PIPELINES.getTable(dbStore), eventQueue);
-    return new SCMContainerManager(config, CONTAINERS.getTable(dbStore),
-        dbStore,
+        PipelineManagerV2Impl.newPipelineManager(
+            config,
+            MockSCMHAManager.getInstance(true),
+            scmNodeManager,
+            scmMetadataStore.getPipelineTable(),
+            eventQueue,
+            SCMContext.emptyContext(),
+            new SCMServiceManager());
+
+    return new SCMContainerManager(config, scmMetadataStore.getContainerTable(),
+        scmMetadataStore.getStore(),
         pipelineManager);
 
   }
@@ -164,7 +170,7 @@ public class TestContainerPlacement {
 
       //TODO: wait for heartbeat to be processed
       Thread.sleep(4 * 1000);
-      assertEquals(nodeCount, nodeManager.getNodeCount(HEALTHY));
+      assertEquals(nodeCount, nodeManager.getNodeCount(null, HEALTHY));
       assertEquals(capacity * nodeCount,
           (long) nodeManager.getStats().getCapacity().get());
       assertEquals(used * nodeCount,

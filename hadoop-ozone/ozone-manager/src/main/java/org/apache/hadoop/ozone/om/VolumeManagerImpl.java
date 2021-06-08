@@ -26,10 +26,9 @@ import org.apache.hadoop.ozone.OzoneAcl;
 import org.apache.hadoop.ozone.OzoneConfigKeys;
 import org.apache.hadoop.ozone.om.exceptions.OMException;
 import org.apache.hadoop.ozone.om.helpers.OmVolumeArgs;
+import org.apache.hadoop.ozone.om.helpers.OzoneAclUtil;
 import org.apache.hadoop.ozone.protocol.proto
     .OzoneManagerProtocolProtos.OzoneAclInfo;
-import org.apache.hadoop.ozone.protocol.proto
-    .OzoneManagerProtocolProtos.UserVolumeInfo;
 import org.apache.hadoop.ozone.security.acl.OzoneObj;
 import org.apache.hadoop.ozone.security.acl.RequestContext;
 import org.apache.hadoop.hdds.utils.db.BatchOperation;
@@ -38,9 +37,11 @@ import com.google.common.base.Preconditions;
 import static org.apache.hadoop.ozone.om.OMConfigKeys.OZONE_OM_USER_MAX_VOLUME;
 import static org.apache.hadoop.ozone.om.OMConfigKeys.OZONE_OM_USER_MAX_VOLUME_DEFAULT;
 import static org.apache.hadoop.ozone.om.exceptions.OMException.ResultCodes;
+import static org.apache.hadoop.ozone.om.exceptions.OMException.ResultCodes.NOT_SUPPORTED_OPERATION;
 import static org.apache.hadoop.ozone.om.lock.OzoneManagerLock.Resource.USER_LOCK;
 import static org.apache.hadoop.ozone.om.lock.OzoneManagerLock.Resource.VOLUME_LOCK;
 
+import org.apache.hadoop.ozone.storage.proto.OzoneManagerStorageProtos.PersistedUserVolumeInfo;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -71,11 +72,12 @@ public class VolumeManagerImpl implements VolumeManager {
   }
 
   // Helpers to add and delete volume from user list
-  private UserVolumeInfo addVolumeToOwnerList(String volume, String owner)
-      throws IOException {
+  private PersistedUserVolumeInfo addVolumeToOwnerList(
+      String volume, String owner) throws IOException {
     // Get the volume list
     String dbUserKey = metadataManager.getUserKey(owner);
-    UserVolumeInfo volumeList = metadataManager.getUserTable().get(dbUserKey);
+    PersistedUserVolumeInfo volumeList =
+        metadataManager.getUserTable().get(dbUserKey);
     List<String> prevVolList = new ArrayList<>();
     if (volumeList != null) {
       prevVolList.addAll(volumeList.getVolumeNamesList());
@@ -90,16 +92,17 @@ public class VolumeManagerImpl implements VolumeManager {
 
     // Add the new volume to the list
     prevVolList.add(volume);
-    UserVolumeInfo newVolList = UserVolumeInfo.newBuilder()
+    PersistedUserVolumeInfo newVolList = PersistedUserVolumeInfo.newBuilder()
         .addAllVolumeNames(prevVolList).build();
 
     return newVolList;
   }
 
-  private UserVolumeInfo delVolumeFromOwnerList(String volume, String owner)
-      throws IOException {
+  private PersistedUserVolumeInfo delVolumeFromOwnerList(
+      String volume, String owner) throws IOException {
     // Get the volume list
-    UserVolumeInfo volumeList = metadataManager.getUserTable().get(owner);
+    PersistedUserVolumeInfo volumeList =
+        metadataManager.getUserTable().get(owner);
     List<String> prevVolList = new ArrayList<>();
     if (volumeList != null) {
       prevVolList.addAll(volumeList.getVolumeNamesList());
@@ -110,7 +113,7 @@ public class VolumeManagerImpl implements VolumeManager {
 
     // Remove the volume from the list
     prevVolList.remove(volume);
-    UserVolumeInfo newVolList = UserVolumeInfo.newBuilder()
+    PersistedUserVolumeInfo newVolList = PersistedUserVolumeInfo.newBuilder()
         .addAllVolumeNames(prevVolList).build();
     return newVolList;
   }
@@ -124,10 +127,10 @@ public class VolumeManagerImpl implements VolumeManager {
     Preconditions.checkNotNull(omVolumeArgs);
 
     boolean acquiredUserLock = false;
-    metadataManager.getLock().acquireLock(VOLUME_LOCK,
+    metadataManager.getLock().acquireWriteLock(VOLUME_LOCK,
         omVolumeArgs.getVolume());
     try {
-      acquiredUserLock = metadataManager.getLock().acquireLock(USER_LOCK,
+      acquiredUserLock = metadataManager.getLock().acquireWriteLock(USER_LOCK,
           omVolumeArgs.getOwnerName());
       String dbVolumeKey = metadataManager.getVolumeKey(
           omVolumeArgs.getVolume());
@@ -142,8 +145,8 @@ public class VolumeManagerImpl implements VolumeManager {
         throw new OMException(ResultCodes.VOLUME_ALREADY_EXISTS);
       }
 
-      UserVolumeInfo volumeList = addVolumeToOwnerList(omVolumeArgs.getVolume(),
-          omVolumeArgs.getOwnerName());
+      PersistedUserVolumeInfo volumeList = addVolumeToOwnerList(
+          omVolumeArgs.getVolume(), omVolumeArgs.getOwnerName());
 
       // Set creation time
       omVolumeArgs.setCreationTime(System.currentTimeMillis());
@@ -162,16 +165,16 @@ public class VolumeManagerImpl implements VolumeManager {
       throw ex;
     } finally {
       if (acquiredUserLock) {
-        metadataManager.getLock().releaseLock(USER_LOCK,
+        metadataManager.getLock().releaseWriteLock(USER_LOCK,
             omVolumeArgs.getOwnerName());
       }
-      metadataManager.getLock().releaseLock(VOLUME_LOCK,
+      metadataManager.getLock().releaseWriteLock(VOLUME_LOCK,
           omVolumeArgs.getVolume());
     }
   }
 
   private void createVolumeCommitToDB(OmVolumeArgs omVolumeArgs,
-      UserVolumeInfo volumeList, String dbVolumeKey, String dbUserKey)
+      PersistedUserVolumeInfo volumeList, String dbVolumeKey, String dbUserKey)
       throws IOException {
     try (BatchOperation batch = metadataManager.getStore()
         .initBatchOperation()) {
@@ -201,7 +204,7 @@ public class VolumeManagerImpl implements VolumeManager {
     Preconditions.checkNotNull(owner);
     boolean acquiredUsersLock = false;
     String actualOwner = null;
-    metadataManager.getLock().acquireLock(VOLUME_LOCK, volume);
+    metadataManager.getLock().acquireWriteLock(VOLUME_LOCK, volume);
     try {
       String dbVolumeKey = metadataManager.getVolumeKey(volume);
       OmVolumeArgs volumeArgs = metadataManager
@@ -220,11 +223,11 @@ public class VolumeManagerImpl implements VolumeManager {
 
       acquiredUsersLock = metadataManager.getLock().acquireMultiUserLock(owner,
           originalOwner);
-      UserVolumeInfo oldOwnerVolumeList = delVolumeFromOwnerList(volume,
-          originalOwner);
+      PersistedUserVolumeInfo oldOwnerVolumeList =
+          delVolumeFromOwnerList(volume, originalOwner);
 
       String newOwner =  metadataManager.getUserKey(owner);
-      UserVolumeInfo newOwnerVolumeList = addVolumeToOwnerList(volume,
+      PersistedUserVolumeInfo newOwnerVolumeList = addVolumeToOwnerList(volume,
           newOwner);
 
       volumeArgs.setOwnerName(owner);
@@ -240,14 +243,13 @@ public class VolumeManagerImpl implements VolumeManager {
       if (acquiredUsersLock) {
         metadataManager.getLock().releaseMultiUserLock(owner, actualOwner);
       }
-      metadataManager.getLock().releaseLock(VOLUME_LOCK, volume);
+      metadataManager.getLock().releaseWriteLock(VOLUME_LOCK, volume);
     }
   }
 
-
-  private void setOwnerCommitToDB(UserVolumeInfo oldOwnerVolumeList,
-      UserVolumeInfo newOwnerVolumeList, OmVolumeArgs newOwnerVolumeArgs,
-      String oldOwner) throws IOException {
+  private void setOwnerCommitToDB(PersistedUserVolumeInfo oldOwnerVolumeList,
+      PersistedUserVolumeInfo newOwnerVolumeList,
+      OmVolumeArgs newOwnerVolumeArgs, String oldOwner) throws IOException {
     try (BatchOperation batch = metadataManager.getStore()
         .initBatchOperation()) {
       if (oldOwnerVolumeList.getVolumeNamesList().size() == 0) {
@@ -265,44 +267,6 @@ public class VolumeManagerImpl implements VolumeManager {
       metadataManager.getVolumeTable().putWithBatch(batch,
           dbVolumeKey, newOwnerVolumeArgs);
       metadataManager.getStore().commitBatchOperation(batch);
-    }
-  }
-
-
-  /**
-   * Changes the Quota on a volume.
-   *
-   * @param volume - Name of the volume.
-   * @param quota - Quota in bytes.
-   *
-   * @throws IOException
-   */
-  @Override
-  public void setQuota(String volume, long quota) throws IOException {
-    Preconditions.checkNotNull(volume);
-    metadataManager.getLock().acquireLock(VOLUME_LOCK, volume);
-    try {
-      String dbVolumeKey = metadataManager.getVolumeKey(volume);
-      OmVolumeArgs volumeArgs =
-          metadataManager.getVolumeTable().get(dbVolumeKey);
-      if (volumeArgs == null) {
-        LOG.debug("volume:{} does not exist", volume);
-        throw new OMException(ResultCodes.VOLUME_NOT_FOUND);
-      }
-
-      Preconditions.checkState(volume.equals(volumeArgs.getVolume()));
-
-      volumeArgs.setQuotaInBytes(quota);
-
-      metadataManager.getVolumeTable().put(dbVolumeKey, volumeArgs);
-    } catch (IOException ex) {
-      if (!(ex instanceof OMException)) {
-        LOG.error("Changing volume quota failed for volume:{} quota:{}", volume,
-            quota, ex);
-      }
-      throw ex;
-    } finally {
-      metadataManager.getLock().releaseLock(VOLUME_LOCK, volume);
     }
   }
 
@@ -348,10 +312,10 @@ public class VolumeManagerImpl implements VolumeManager {
     Preconditions.checkNotNull(volume);
     String owner = null;
     boolean acquiredUserLock = false;
-    metadataManager.getLock().acquireLock(VOLUME_LOCK, volume);
+    metadataManager.getLock().acquireWriteLock(VOLUME_LOCK, volume);
     try {
       owner = getVolumeInfo(volume).getOwnerName();
-      acquiredUserLock = metadataManager.getLock().acquireLock(USER_LOCK,
+      acquiredUserLock = metadataManager.getLock().acquireWriteLock(USER_LOCK,
           owner);
       String dbVolumeKey = metadataManager.getVolumeKey(volume);
       OmVolumeArgs volumeArgs =
@@ -369,7 +333,7 @@ public class VolumeManagerImpl implements VolumeManager {
       Preconditions.checkState(volume.equals(volumeArgs.getVolume()));
       // delete the volume from the owner list
       // as well as delete the volume entry
-      UserVolumeInfo newVolumeList = delVolumeFromOwnerList(volume,
+      PersistedUserVolumeInfo newVolumeList = delVolumeFromOwnerList(volume,
           volumeArgs.getOwnerName());
 
 
@@ -381,15 +345,15 @@ public class VolumeManagerImpl implements VolumeManager {
       throw ex;
     } finally {
       if (acquiredUserLock) {
-        metadataManager.getLock().releaseLock(USER_LOCK, owner);
+        metadataManager.getLock().releaseWriteLock(USER_LOCK, owner);
       }
-      metadataManager.getLock().releaseLock(VOLUME_LOCK, volume);
+      metadataManager.getLock().releaseWriteLock(VOLUME_LOCK, volume);
 
     }
   }
 
 
-  private void deleteVolumeCommitToDB(UserVolumeInfo newVolumeList,
+  private void deleteVolumeCommitToDB(PersistedUserVolumeInfo newVolumeList,
       String volume, String owner) throws IOException {
     try (BatchOperation batch = metadataManager.getStore()
         .initBatchOperation()) {
@@ -419,28 +383,7 @@ public class VolumeManagerImpl implements VolumeManager {
       throws IOException {
     Preconditions.checkNotNull(volume);
     Preconditions.checkNotNull(userAcl);
-    metadataManager.getLock().acquireReadLock(VOLUME_LOCK, volume);
-    try {
-      String dbVolumeKey = metadataManager.getVolumeKey(volume);
-      OmVolumeArgs volumeArgs =
-          metadataManager.getVolumeTable().get(dbVolumeKey);
-      if (volumeArgs == null) {
-        LOG.debug("volume:{} does not exist", volume);
-        throw new OMException("Volume " + volume + " is not found",
-            ResultCodes.VOLUME_NOT_FOUND);
-      }
-
-      Preconditions.checkState(volume.equals(volumeArgs.getVolume()));
-      return volumeArgs.getAclMap().hasAccess(userAcl);
-    } catch (IOException ex) {
-      if (!(ex instanceof OMException)) {
-        LOG.error("Check volume access failed for volume:{} user:{} rights:{}",
-            volume, userAcl.getName(), userAcl.getRights().toString(), ex);
-      }
-      throw ex;
-    } finally {
-      metadataManager.getLock().releaseReadLock(VOLUME_LOCK, volume);
-    }
+    throw new OMException(NOT_SUPPORTED_OPERATION);
   }
 
   /**
@@ -474,7 +417,7 @@ public class VolumeManagerImpl implements VolumeManager {
           "VolumeManager. OzoneObj type:" + obj.getResourceType());
     }
     String volume = obj.getVolumeName();
-    metadataManager.getLock().acquireLock(VOLUME_LOCK, volume);
+    metadataManager.getLock().acquireWriteLock(VOLUME_LOCK, volume);
     try {
       String dbVolumeKey = metadataManager.getVolumeKey(volume);
       OmVolumeArgs volumeArgs =
@@ -484,18 +427,10 @@ public class VolumeManagerImpl implements VolumeManager {
         throw new OMException("Volume " + volume + " is not found",
             ResultCodes.VOLUME_NOT_FOUND);
       }
-      try {
-        volumeArgs.addAcl(acl);
-      } catch (OMException ex) {
-        if (LOG.isDebugEnabled()) {
-          LOG.debug("Add acl failed.", ex);
-        }
-        return false;
+      if (volumeArgs.addAcl(acl)) {
+        metadataManager.getVolumeTable().put(dbVolumeKey, volumeArgs);
+        return true;
       }
-      metadataManager.getVolumeTable().put(dbVolumeKey, volumeArgs);
-
-      Preconditions.checkState(volume.equals(volumeArgs.getVolume()));
-      //return volumeArgs.getAclMap().hasAccess(userAcl);
     } catch (IOException ex) {
       if (!(ex instanceof OMException)) {
         LOG.error("Add acl operation failed for volume:{} acl:{}",
@@ -503,10 +438,10 @@ public class VolumeManagerImpl implements VolumeManager {
       }
       throw ex;
     } finally {
-      metadataManager.getLock().releaseLock(VOLUME_LOCK, volume);
+      metadataManager.getLock().releaseWriteLock(VOLUME_LOCK, volume);
     }
 
-    return true;
+    return false;
   }
 
   /**
@@ -526,7 +461,7 @@ public class VolumeManagerImpl implements VolumeManager {
           "VolumeManager. OzoneObj type:" + obj.getResourceType());
     }
     String volume = obj.getVolumeName();
-    metadataManager.getLock().acquireLock(VOLUME_LOCK, volume);
+    metadataManager.getLock().acquireWriteLock(VOLUME_LOCK, volume);
     try {
       String dbVolumeKey = metadataManager.getVolumeKey(volume);
       OmVolumeArgs volumeArgs =
@@ -536,15 +471,10 @@ public class VolumeManagerImpl implements VolumeManager {
         throw new OMException("Volume " + volume + " is not found",
             ResultCodes.VOLUME_NOT_FOUND);
       }
-      try {
-        volumeArgs.removeAcl(acl);
-      } catch (OMException ex) {
-        if (LOG.isDebugEnabled()) {
-          LOG.debug("Remove acl failed.", ex);
-        }
-        return false;
+      if (volumeArgs.removeAcl(acl)) {
+        metadataManager.getVolumeTable().put(dbVolumeKey, volumeArgs);
+        return true;
       }
-      metadataManager.getVolumeTable().put(dbVolumeKey, volumeArgs);
 
       Preconditions.checkState(volume.equals(volumeArgs.getVolume()));
       //return volumeArgs.getAclMap().hasAccess(userAcl);
@@ -555,10 +485,10 @@ public class VolumeManagerImpl implements VolumeManager {
       }
       throw ex;
     } finally {
-      metadataManager.getLock().releaseLock(VOLUME_LOCK, volume);
+      metadataManager.getLock().releaseWriteLock(VOLUME_LOCK, volume);
     }
 
-    return true;
+    return false;
   }
 
   /**
@@ -579,7 +509,7 @@ public class VolumeManagerImpl implements VolumeManager {
           "VolumeManager. OzoneObj type:" + obj.getResourceType());
     }
     String volume = obj.getVolumeName();
-    metadataManager.getLock().acquireLock(VOLUME_LOCK, volume);
+    metadataManager.getLock().acquireWriteLock(VOLUME_LOCK, volume);
     try {
       String dbVolumeKey = metadataManager.getVolumeKey(volume);
       OmVolumeArgs volumeArgs =
@@ -601,7 +531,7 @@ public class VolumeManagerImpl implements VolumeManager {
       }
       throw ex;
     } finally {
-      metadataManager.getLock().releaseLock(VOLUME_LOCK, volume);
+      metadataManager.getLock().releaseWriteLock(VOLUME_LOCK, volume);
     }
 
     return true;
@@ -634,7 +564,7 @@ public class VolumeManagerImpl implements VolumeManager {
       }
 
       Preconditions.checkState(volume.equals(volumeArgs.getVolume()));
-      return volumeArgs.getAclMap().getAcl();
+      return volumeArgs.getAcls();
     } catch (IOException ex) {
       if (!(ex instanceof OMException)) {
         LOG.error("Get acl operation failed for volume:{}", volume, ex);
@@ -659,7 +589,7 @@ public class VolumeManagerImpl implements VolumeManager {
     Objects.requireNonNull(context);
 
     String volume = ozObject.getVolumeName();
-    metadataManager.getLock().acquireLock(VOLUME_LOCK, volume);
+    metadataManager.getLock().acquireReadLock(VOLUME_LOCK, volume);
     try {
       String dbVolumeKey = metadataManager.getVolumeKey(volume);
       OmVolumeArgs volumeArgs =
@@ -671,8 +601,8 @@ public class VolumeManagerImpl implements VolumeManager {
       }
 
       Preconditions.checkState(volume.equals(volumeArgs.getVolume()));
-      boolean hasAccess = volumeArgs.getAclMap().hasAccess(
-          context.getAclRights(), context.getClientUgi());
+      boolean hasAccess = OzoneAclUtil.checkAclRights(
+          volumeArgs.getAcls(), context);
       if (LOG.isDebugEnabled()) {
         LOG.debug("user:{} has access rights for volume:{} :{} ",
             context.getClientUgi(), ozObject.getVolumeName(), hasAccess);
@@ -686,7 +616,7 @@ public class VolumeManagerImpl implements VolumeManager {
       throw new OMException("Check access operation failed for " +
           "volume:" + volume, ex, ResultCodes.INTERNAL_ERROR);
     } finally {
-      metadataManager.getLock().releaseLock(VOLUME_LOCK, volume);
+      metadataManager.getLock().releaseReadLock(VOLUME_LOCK, volume);
     }
   }
 }

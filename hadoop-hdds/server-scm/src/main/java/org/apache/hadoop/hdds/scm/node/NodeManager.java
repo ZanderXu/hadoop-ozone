@@ -17,16 +17,17 @@
  */
 package org.apache.hadoop.hdds.scm.node;
 
+import org.apache.hadoop.hdds.protocol.DatanodeDetails;
+import org.apache.hadoop.hdds.protocol.proto.HddsProtos.NodeOperationalState;
+import org.apache.hadoop.hdds.protocol.proto.HddsProtos.NodeState;
 import org.apache.hadoop.hdds.protocol.proto.StorageContainerDatanodeProtocolProtos.NodeReportProto;
 import org.apache.hadoop.hdds.scm.container.ContainerID;
-import org.apache.hadoop.hdds.scm.net.NetworkTopology;
-import org.apache.hadoop.hdds.scm.pipeline.Pipeline;
-import org.apache.hadoop.hdds.scm.pipeline.PipelineID;
 import org.apache.hadoop.hdds.scm.container.placement.metrics.SCMNodeMetric;
 import org.apache.hadoop.hdds.scm.container.placement.metrics.SCMNodeStat;
+import org.apache.hadoop.hdds.scm.net.NetworkTopology;
 import org.apache.hadoop.hdds.scm.node.states.NodeNotFoundException;
-import org.apache.hadoop.hdds.protocol.DatanodeDetails;
-import org.apache.hadoop.hdds.protocol.proto.HddsProtos.NodeState;
+import org.apache.hadoop.hdds.scm.pipeline.Pipeline;
+import org.apache.hadoop.hdds.scm.pipeline.PipelineID;
 import org.apache.hadoop.hdds.server.events.EventHandler;
 import org.apache.hadoop.ozone.protocol.StorageContainerNodeProtocol;
 import org.apache.hadoop.ozone.protocol.commands.CommandForDatanode;
@@ -64,18 +65,38 @@ public interface NodeManager extends StorageContainerNodeProtocol,
     EventHandler<CommandForDatanode>, NodeManagerMXBean, Closeable {
 
   /**
-   * Gets all Live Datanodes that is currently communicating with SCM.
-   * @param nodeState - State of the node
+   * Gets all Live Datanodes that are currently communicating with SCM.
+   * @param nodeStatus - Status of the node to return
    * @return List of Datanodes that are Heartbeating SCM.
    */
-  List<DatanodeDetails> getNodes(NodeState nodeState);
+  List<DatanodeDetails> getNodes(NodeStatus nodeStatus);
 
   /**
-   * Returns the Number of Datanodes that are communicating with SCM.
-   * @param nodeState - State of the node
+   * Gets all Live Datanodes that is currently communicating with SCM.
+   * @param opState - The operational state of the node
+   * @param health - The health of the node
+   * @return List of Datanodes that are Heartbeating SCM.
+   */
+  List<DatanodeDetails> getNodes(
+      NodeOperationalState opState, NodeState health);
+
+  /**
+   * Returns the Number of Datanodes that are communicating with SCM with the
+   * given status.
+   * @param nodeStatus - State of the node
    * @return int -- count
    */
-  int getNodeCount(NodeState nodeState);
+  int getNodeCount(NodeStatus nodeStatus);
+
+  /**
+   * Returns the Number of Datanodes that are communicating with SCM in the
+   * given state.
+   * @param opState - The operational state of the node
+   * @param health - The health of the node
+   * @return int -- count
+   */
+  int getNodeCount(
+      NodeOperationalState opState, NodeState health);
 
   /**
    * Get all datanodes known to SCM.
@@ -97,6 +118,17 @@ public interface NodeManager extends StorageContainerNodeProtocol,
   Map<DatanodeDetails, SCMNodeStat> getNodeStats();
 
   /**
+   * Gets a sorted list of most or least used DatanodeUsageInfo containing
+   * healthy, in-service nodes. If the specified mostUsed is true, the returned
+   * list is in descending order of usage. Otherwise, the returned list is in
+   * ascending order of usage.
+   *
+   * @param mostUsed true if most used, false if least used
+   * @return List of DatanodeUsageInfo
+   */
+  List<DatanodeUsageInfo> getMostOrLeastUsedDatanodes(boolean mostUsed);
+
+  /**
    * Return the node stat of the specified datanode.
    * @param datanodeDetails DatanodeDetails.
    * @return node stat if it is live/stale, null if it is decommissioned or
@@ -105,11 +137,33 @@ public interface NodeManager extends StorageContainerNodeProtocol,
   SCMNodeMetric getNodeStat(DatanodeDetails datanodeDetails);
 
   /**
-   * Returns the node state of a specific node.
+   * Returns the node status of a specific node.
    * @param datanodeDetails DatanodeDetails
-   * @return Healthy/Stale/Dead.
+   * @return NodeStatus for the node
+   * @throws NodeNotFoundException if the node does not exist
    */
-  NodeState getNodeState(DatanodeDetails datanodeDetails);
+  NodeStatus getNodeStatus(DatanodeDetails datanodeDetails)
+      throws NodeNotFoundException;
+
+  /**
+   * Set the operation state of a node.
+   * @param datanodeDetails The datanode to set the new state for
+   * @param newState The new operational state for the node
+   */
+  void setNodeOperationalState(DatanodeDetails datanodeDetails,
+      NodeOperationalState newState) throws NodeNotFoundException;
+
+  /**
+   * Set the operation state of a node.
+   * @param datanodeDetails The datanode to set the new state for
+   * @param newState The new operational state for the node
+   * @param opStateExpiryEpocSec Seconds from the epoch when the operational
+   *                             state should end. Zero indicates the state
+   *                             never end.
+   */
+  void setNodeOperationalState(DatanodeDetails datanodeDetails,
+       NodeOperationalState newState,
+       long opStateExpiryEpocSec) throws NodeNotFoundException;
 
   /**
    * Get set of pipelines a datanode is part of.
@@ -213,4 +267,10 @@ public interface NodeManager extends StorageContainerNodeProtocol,
    * @return cluster map
    */
   NetworkTopology getClusterNetworkTopologyMap();
+
+  int minHealthyVolumeNum(List <DatanodeDetails> dnList);
+
+  int pipelineLimit(DatanodeDetails dn);
+
+  int minPipelineLimit(List<DatanodeDetails> dn);
 }

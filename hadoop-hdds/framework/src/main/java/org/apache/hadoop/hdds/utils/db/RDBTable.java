@@ -21,17 +21,25 @@ package org.apache.hadoop.hdds.utils.db;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.ArrayList;
+import java.util.Arrays;
 
 import org.apache.hadoop.hdds.annotation.InterfaceAudience;
 import org.apache.hadoop.hdds.StringUtils;
 
 import org.rocksdb.ColumnFamilyHandle;
+import org.rocksdb.Holder;
 import org.rocksdb.ReadOptions;
 import org.rocksdb.RocksDB;
 import org.rocksdb.RocksDBException;
 import org.rocksdb.WriteOptions;
+import org.rocksdb.RocksIterator;
+import org.apache.hadoop.hdds.utils.MetadataKeyFilters;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import static org.apache.hadoop.hdds.utils.HddsServerUtil.toIOException;
 
 /**
  * RocksDB implementation of ozone metadata store. This class should be only
@@ -63,22 +71,6 @@ class RDBTable implements Table<byte[], byte[]> {
     this.handle = handle;
     this.writeOptions = writeOptions;
     this.rdbMetrics = rdbMetrics;
-  }
-
-  /**
-   * Converts RocksDB exception to IOE.
-   * @param msg  - Message to add to exception.
-   * @param e - Original Exception.
-   * @return  IOE.
-   */
-  public static IOException toIOException(String msg, RocksDBException e) {
-    String statusCode = e.getStatus() == null ? "N/A" :
-        e.getStatus().getCodeString();
-    String errMessage = e.getMessage() == null ? "Unknown error" :
-        e.getMessage();
-    String output = msg + "; status : " + statusCode
-        + "; message : " + errMessage;
-    return new IOException(output, e);
   }
 
   /**
@@ -128,11 +120,12 @@ class RDBTable implements Table<byte[], byte[]> {
       // If the key definitely does not exist in the database, then this
       // method returns false, else true.
       rdbMetrics.incNumDBKeyMayExistChecks();
-      StringBuilder outValue = new StringBuilder();
+      Holder<byte[]> outValue = new Holder<>();
       boolean keyMayExist = db.keyMayExist(handle, key, outValue);
       if (keyMayExist) {
-        boolean keyExists = (outValue.length() > 0) ||
-            (db.get(handle, key) != null);
+        boolean keyExists =
+            (outValue.getValue() != null && outValue.getValue().length > 0) ||
+                (db.get(handle, key) != null);
         if (!keyExists) {
           rdbMetrics.incNumDBKeyMayExistMisses();
         }
@@ -155,6 +148,19 @@ class RDBTable implements Table<byte[], byte[]> {
     }
   }
 
+  /**
+   * Skip checking cache and get the value mapped to the given key in byte
+   * array or returns null if the key is not found.
+   *
+   * @param bytes metadata key
+   * @return value in byte array or null if the key is not found.
+   * @throws IOException on Failure
+   */
+  @Override
+  public byte[] getSkipCache(byte[] bytes) throws IOException {
+    return get(bytes);
+  }
+
   @Override
   public byte[] getIfExist(byte[] key) throws IOException {
     try {
@@ -162,8 +168,7 @@ class RDBTable implements Table<byte[], byte[]> {
       // If the key definitely does not exist in the database, then this
       // method returns false, else true.
       rdbMetrics.incNumDBKeyGetIfExistChecks();
-      StringBuilder outValue = new StringBuilder();
-      boolean keyMayExist = db.keyMayExist(handle, key, outValue);
+      boolean keyMayExist = db.keyMayExist(handle, key, null);
       if (keyMayExist) {
         // Not using out value from string builder, as that is causing
         // IllegalArgumentException during protobuf parsing.
@@ -205,7 +210,7 @@ class RDBTable implements Table<byte[], byte[]> {
   public TableIterator<byte[], ByteArrayKeyValue> iterator() {
     ReadOptions readOptions = new ReadOptions();
     readOptions.setFillCache(false);
-    return new RDBStoreIterator(db.newIterator(handle, readOptions));
+    return new RDBStoreIterator(db.newIterator(handle, readOptions), this);
   }
 
   @Override
@@ -230,5 +235,92 @@ class RDBTable implements Table<byte[], byte[]> {
       throw toIOException(
           "Failed to get estimated key count of table " + getName(), e);
     }
+  }
+
+  @Override
+  public List<ByteArrayKeyValue> getRangeKVs(byte[] startKey,
+      int count, MetadataKeyFilters.MetadataKeyFilter... filters)
+      throws IOException, IllegalArgumentException {
+    return getRangeKVs(startKey, count, false, filters);
+  }
+
+  @Override
+  public List<ByteArrayKeyValue> getSequentialRangeKVs(byte[] startKey,
+      int count, MetadataKeyFilters.MetadataKeyFilter... filters)
+      throws IOException, IllegalArgumentException {
+    return getRangeKVs(startKey, count, true, filters);
+  }
+
+  private List<ByteArrayKeyValue> getRangeKVs(byte[] startKey,
+      int count, boolean sequential,
+      MetadataKeyFilters.MetadataKeyFilter... filters)
+      throws IOException, IllegalArgumentException {
+    List<ByteArrayKeyValue> result = new ArrayList<>();
+    long start = System.currentTimeMillis();
+    if (count < 0) {
+      throw new IllegalArgumentException(
+            "Invalid count given " + count + ", count must be greater than 0");
+    }
+    try (RocksIterator it = db.newIterator(handle)) {
+      if (startKey == null) {
+        it.seekToFirst();
+      } else {
+        if (get(startKey) == null) {
+          // Key not found, return empty list
+          return result;
+        }
+        it.seek(startKey);
+      }
+      while (it.isValid() && result.size() < count) {
+        byte[] currentKey = it.key();
+        byte[] currentValue = it.value();
+
+        it.prev();
+        final byte[] prevKey = it.isValid() ? it.key() : null;
+
+        it.seek(currentKey);
+        it.next();
+        final byte[] nextKey = it.isValid() ? it.key() : null;
+
+        if (filters == null) {
+          result.add(ByteArrayKeyValue
+                  .create(currentKey, currentValue));
+        } else {
+          if (Arrays.stream(filters)
+                  .allMatch(entry -> entry.filterKey(prevKey,
+                          currentKey, nextKey))) {
+            result.add(ByteArrayKeyValue
+                    .create(currentKey, currentValue));
+          } else {
+            if (result.size() > 0 && sequential) {
+              // if the caller asks for a sequential range of results,
+              // and we met a dis-match, abort iteration from here.
+              // if result is empty, we continue to look for the first match.
+              break;
+            }
+          }
+        }
+      }
+    } finally {
+      long end = System.currentTimeMillis();
+      long timeConsumed = end - start;
+      if (LOG.isDebugEnabled()) {
+        if (filters != null) {
+          for (MetadataKeyFilters.MetadataKeyFilter filter : filters) {
+            int scanned = filter.getKeysScannedNum();
+            int hinted = filter.getKeysHintedNum();
+            if (scanned > 0 || hinted > 0) {
+              LOG.debug(
+                  "getRangeKVs ({}) numOfKeysScanned={}, numOfKeysHinted={}",
+                  filter.getClass().getSimpleName(), filter.getKeysScannedNum(),
+                  filter.getKeysHintedNum());
+            }
+          }
+        }
+        LOG.debug("Time consumed for getRangeKVs() is {}ms,"
+                + " result length is {}.", timeConsumed, result.size());
+      }
+    }
+    return result;
   }
 }

@@ -17,15 +17,18 @@
  */
 package org.apache.hadoop.hdds.scm.pipeline;
 
-import com.google.common.base.Preconditions;
-import org.apache.hadoop.hdds.protocol.DatanodeDetails;
-import org.apache.hadoop.hdds.protocol.MockDatanodeDetails;
-import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
-
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+
+import org.apache.hadoop.hdds.client.RatisReplicationConfig;
+import org.apache.hadoop.hdds.client.StandaloneReplicationConfig;
+import org.apache.hadoop.hdds.protocol.DatanodeDetails;
+import org.apache.hadoop.hdds.protocol.MockDatanodeDetails;
+import org.apache.hadoop.hdds.protocol.proto.HddsProtos.ReplicationFactor;
+
+import com.google.common.base.Preconditions;
 
 /**
  * Provides {@link Pipeline} factory methods for testing.
@@ -62,9 +65,25 @@ public final class MockPipeline {
     return Pipeline.newBuilder()
         .setState(Pipeline.PipelineState.OPEN)
         .setId(PipelineID.randomId())
-        .setType(HddsProtos.ReplicationType.STAND_ALONE)
-        .setFactor(HddsProtos.ReplicationFactor.ONE)
+        .setReplicationConfig(
+            new StandaloneReplicationConfig(ReplicationFactor.ONE))
         .setNodes(dns)
+        .build();
+  }
+
+  public static Pipeline createRatisPipeline() {
+
+    List<DatanodeDetails> nodes = new ArrayList<>();
+    nodes.add(MockDatanodeDetails.randomDatanodeDetails());
+    nodes.add(MockDatanodeDetails.randomDatanodeDetails());
+    nodes.add(MockDatanodeDetails.randomDatanodeDetails());
+
+    return Pipeline.newBuilder()
+        .setState(Pipeline.PipelineState.OPEN)
+        .setId(PipelineID.randomId())
+        .setReplicationConfig(
+            new RatisReplicationConfig(ReplicationFactor.THREE))
+        .setNodes(nodes)
         .build();
   }
 

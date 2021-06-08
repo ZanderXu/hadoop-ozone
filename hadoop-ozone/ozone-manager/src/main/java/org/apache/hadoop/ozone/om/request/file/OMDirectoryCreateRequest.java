@@ -28,9 +28,8 @@ import java.util.Map;
 
 import com.google.common.base.Optional;
 import com.google.common.base.Preconditions;
+import org.apache.hadoop.hdds.client.ReplicationConfig;
 import org.apache.hadoop.ozone.OzoneAcl;
-import org.apache.hadoop.ozone.om.exceptions.OMReplayException;
-import org.apache.commons.lang3.tuple.ImmutablePair;
 import org.apache.hadoop.ozone.om.helpers.OmKeyInfo;
 import org.apache.hadoop.ozone.om.helpers.OmKeyLocationInfoGroup;
 import org.apache.hadoop.ozone.om.helpers.OzoneAclUtil;
@@ -42,7 +41,6 @@ import org.apache.hadoop.ozone.security.acl.OzoneObj;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
 import org.apache.hadoop.ozone.audit.AuditLogger;
 import org.apache.hadoop.ozone.audit.OMAction;
 import org.apache.hadoop.ozone.om.OMMetadataManager;
@@ -84,14 +82,17 @@ public class OMDirectoryCreateRequest extends OMKeyRequest {
   private static final Logger LOG =
       LoggerFactory.getLogger(OMDirectoryCreateRequest.class);
 
+  // The maximum number of directories which can be created through a single
+  // transaction (recursive directory creations) is 2^8 - 1 as only 8
+  // bits are set aside for this in ObjectID.
+  private static final long MAX_NUM_OF_RECURSIVE_DIRS = 255;
+
   /**
    * Stores the result of request execution in
    * OMClientRequest#validateAndUpdateCache.
    */
   public enum Result {
     SUCCESS, // The request was executed successfully
-
-    REPLAY, // The request is a replay and was ignored
 
     DIRECTORY_ALREADY_EXISTS, // Directory key already exists in DB
 
@@ -147,8 +148,13 @@ public class OMDirectoryCreateRequest extends OMKeyRequest {
     OMClientResponse omClientResponse = null;
     Result result = Result.FAILURE;
     List<OmKeyInfo> missingParentInfos;
+    int numMissingParents = 0;
 
     try {
+      keyArgs = resolveBucketLink(ozoneManager, keyArgs, auditMap);
+      volumeName = keyArgs.getVolumeName();
+      bucketName = keyArgs.getBucketName();
+
       // check Acl
       checkKeyAcls(ozoneManager, volumeName, bucketName, keyName,
           IAccessAuthorizer.ACLType.CREATE, OzoneObj.ResourceType.KEY);
@@ -184,7 +190,7 @@ public class OMDirectoryCreateRequest extends OMKeyRequest {
       } else if (omDirectoryResult == DIRECTORY_EXISTS_IN_GIVENPATH ||
           omDirectoryResult == NONE) {
         List<String> missingParents = omPathInfo.getMissingParents();
-        long baseObjId = OMFileRequest.getObjIDFromTxId(trxnLogIndex);
+        long baseObjId = ozoneManager.getObjectIdFromTxId(trxnLogIndex);
         List<OzoneAcl> inheritAcls = omPathInfo.getAcls();
 
         dirKeyInfo = createDirectoryKeyInfoWithACL(keyName,
@@ -194,37 +200,24 @@ public class OMDirectoryCreateRequest extends OMKeyRequest {
         missingParentInfos = getAllParentInfo(ozoneManager, keyArgs,
             missingParents, inheritAcls, trxnLogIndex);
 
+        numMissingParents = missingParentInfos.size();
         OMFileRequest.addKeyTableCacheEntries(omMetadataManager, volumeName,
             bucketName, Optional.of(dirKeyInfo),
             Optional.of(missingParentInfos), trxnLogIndex);
-
-        omClientResponse = new OMDirectoryCreateResponse(omResponse.build(),
-            dirKeyInfo, missingParentInfos);
         result = Result.SUCCESS;
+        omClientResponse = new OMDirectoryCreateResponse(omResponse.build(),
+            dirKeyInfo, missingParentInfos, result);
       } else {
         // omDirectoryResult == DIRECTORY_EXITS
-        // Check if this is a replay of ratis logs
-        String dirKey = omMetadataManager.getOzoneDirKey(volumeName,
-            bucketName, keyName);
-        OmKeyInfo dbKeyInfo = omMetadataManager.getKeyTable().get(dirKey);
-        if (isReplay(ozoneManager, dbKeyInfo, trxnLogIndex)) {
-          throw new OMReplayException();
-        } else {
-          result = Result.DIRECTORY_ALREADY_EXISTS;
-          omResponse.setStatus(Status.DIRECTORY_ALREADY_EXISTS);
-          omClientResponse = new OMDirectoryCreateResponse(omResponse.build());
-        }
+        result = Result.DIRECTORY_ALREADY_EXISTS;
+        omResponse.setStatus(Status.DIRECTORY_ALREADY_EXISTS);
+        omClientResponse = new OMDirectoryCreateResponse(omResponse.build(),
+            result);
       }
     } catch (IOException ex) {
-      if (ex instanceof OMReplayException) {
-        result = Result.REPLAY;
-        omClientResponse = new OMDirectoryCreateResponse(
-            createReplayOMResponse(omResponse));
-      } else {
-        exception = ex;
-        omClientResponse = new OMDirectoryCreateResponse(
-            createErrorOMResponse(omResponse, exception));
-      }
+      exception = ex;
+      omClientResponse = new OMDirectoryCreateResponse(
+          createErrorOMResponse(omResponse, exception), result);
     } finally {
       addResponseToDoubleBuffer(trxnLogIndex, omClientResponse,
           omDoubleBufferHelper);
@@ -234,13 +227,11 @@ public class OMDirectoryCreateRequest extends OMKeyRequest {
       }
     }
 
-    if (result != Result.REPLAY) {
-      auditLog(auditLogger, buildAuditMessage(OMAction.CREATE_DIRECTORY,
-          auditMap, exception, userInfo));
-    }
+    auditLog(auditLogger, buildAuditMessage(OMAction.CREATE_DIRECTORY,
+        auditMap, exception, userInfo));
 
-    logResult(createDirectoryRequest, keyArgs, omMetrics, result, trxnLogIndex,
-        exception);
+    logResult(createDirectoryRequest, keyArgs, omMetrics, result,
+        exception, numMissingParents);
 
     return omClientResponse;
   }
@@ -261,11 +252,12 @@ public class OMDirectoryCreateRequest extends OMKeyRequest {
     OMMetadataManager omMetadataManager = ozoneManager.getMetadataManager();
     List<OmKeyInfo> missingParentInfos = new ArrayList<>();
 
-    ImmutablePair<Long, Long> objIdRange = OMFileRequest
-        .getObjIdRangeFromTxId(trxnLogIndex);
-    long baseObjId = objIdRange.getLeft();
-    long maxObjId = objIdRange.getRight();
-    long maxLevels = maxObjId - baseObjId;
+    // The base id is left shifted by 8 bits for creating space to
+    // create (2^8 - 1) object ids in every request.
+    // maxObjId represents the largest object id allocation possible inside
+    // the transaction.
+    long baseObjId = ozoneManager.getObjectIdFromTxId(trxnLogIndex);
+    long maxObjId = baseObjId + MAX_NUM_OF_RECURSIVE_DIRS;
     long objectCount = 1; // baseObjID is used by the leaf directory
 
     String volumeName = keyArgs.getVolumeName();
@@ -276,8 +268,8 @@ public class OMDirectoryCreateRequest extends OMKeyRequest {
       long nextObjId = baseObjId + objectCount;
       if (nextObjId > maxObjId) {
         throw new OMException("Too many directories in path. Exceeds limit of "
-            + maxLevels + ". Unable to create directory: " + keyName
-            + " in volume/bucket: " + volumeName + "/" + bucketName,
+            + MAX_NUM_OF_RECURSIVE_DIRS + ". Unable to create directory: "
+            + keyName + " in volume/bucket: " + volumeName + "/" + bucketName,
             INVALID_KEY_NAME);
       }
 
@@ -299,8 +291,8 @@ public class OMDirectoryCreateRequest extends OMKeyRequest {
   }
 
   private void logResult(CreateDirectoryRequest createDirectoryRequest,
-      KeyArgs keyArgs, OMMetrics omMetrics, Result result, long trxnLogIndex,
-      IOException exception) {
+      KeyArgs keyArgs, OMMetrics omMetrics, Result result,
+      IOException exception, int numMissingParents) {
 
     String volumeName = keyArgs.getVolumeName();
     String bucketName = keyArgs.getBucketName();
@@ -308,16 +300,11 @@ public class OMDirectoryCreateRequest extends OMKeyRequest {
 
     switch (result) {
     case SUCCESS:
-      omMetrics.incNumKeys();
+      // Count for the missing parents plus the directory being created.
+      omMetrics.incNumKeys(numMissingParents + 1);
       if (LOG.isDebugEnabled()) {
         LOG.debug("Directory created. Volume:{}, Bucket:{}, Key:{}",
             volumeName, bucketName, keyName);
-      }
-      break;
-    case REPLAY:
-      if (LOG.isDebugEnabled()) {
-        LOG.debug("Replayed Transaction {} ignored. Request: {}", trxnLogIndex,
-            createDirectoryRequest);
       }
       break;
     case DIRECTORY_ALREADY_EXISTS:
@@ -368,8 +355,8 @@ public class OMDirectoryCreateRequest extends OMKeyRequest {
         .setCreationTime(keyArgs.getModificationTime())
         .setModificationTime(keyArgs.getModificationTime())
         .setDataSize(0)
-        .setReplicationType(HddsProtos.ReplicationType.RATIS)
-        .setReplicationFactor(HddsProtos.ReplicationFactor.ONE)
+        .setReplicationConfig(ReplicationConfig
+                .fromTypeAndFactor(keyArgs.getType(), keyArgs.getFactor()))
         .setObjectID(objectId)
         .setUpdateID(objectId);
   }

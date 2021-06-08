@@ -23,21 +23,23 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Paths;
+import java.security.cert.X509Certificate;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-import java.util.Optional;
+import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.locks.ReentrantReadWriteLock;
 
+import com.google.common.base.Preconditions;
 import org.apache.hadoop.hdds.conf.ConfigurationSource;
 import org.apache.hadoop.hdds.conf.StorageUnit;
+import org.apache.hadoop.hdds.security.x509.SecurityConfig;
+import org.apache.hadoop.hdds.security.x509.certificate.client.CertificateClient;
 import org.apache.hadoop.hdds.server.ServerUtils;
 import org.apache.hadoop.hdds.tracing.TracingUtil;
+import org.apache.hadoop.hdds.utils.HAUtils;
+import org.apache.hadoop.ipc.ProtobufRpcEngine.Server;
 import org.apache.hadoop.ozone.om.OMConfigKeys;
 import org.apache.hadoop.ozone.om.OzoneManager;
 import org.apache.hadoop.ozone.om.exceptions.OMException;
@@ -54,36 +56,40 @@ import com.google.common.base.Strings;
 import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.protobuf.ServiceException;
 import org.apache.ratis.RaftConfigKeys;
+import org.apache.ratis.conf.Parameters;
 import org.apache.ratis.conf.RaftProperties;
 import org.apache.ratis.grpc.GrpcConfigKeys;
+import org.apache.ratis.grpc.GrpcTlsConfig;
 import org.apache.ratis.netty.NettyConfigKeys;
-import org.apache.ratis.proto.RaftProtos.RaftPeerRole;
-import org.apache.ratis.proto.RaftProtos.RoleInfoProto;
 import org.apache.ratis.protocol.ClientId;
-import org.apache.ratis.protocol.GroupInfoReply;
-import org.apache.ratis.protocol.GroupInfoRequest;
-import org.apache.ratis.protocol.LeaderNotReadyException;
+import org.apache.ratis.protocol.exceptions.LeaderNotReadyException;
+import org.apache.ratis.protocol.exceptions.NotLeaderException;
+import org.apache.ratis.protocol.exceptions.StateMachineException;
 import org.apache.ratis.protocol.Message;
-import org.apache.ratis.protocol.NotLeaderException;
 import org.apache.ratis.protocol.RaftClientReply;
 import org.apache.ratis.protocol.RaftClientRequest;
 import org.apache.ratis.protocol.RaftGroup;
 import org.apache.ratis.protocol.RaftGroupId;
 import org.apache.ratis.protocol.RaftPeer;
 import org.apache.ratis.protocol.RaftPeerId;
-import org.apache.ratis.protocol.StateMachineException;
 import org.apache.ratis.rpc.RpcType;
 import org.apache.ratis.rpc.SupportedRpcType;
 import org.apache.ratis.server.RaftServer;
 import org.apache.ratis.server.RaftServerConfigKeys;
 import org.apache.ratis.server.protocol.TermIndex;
-import org.apache.ratis.thirdparty.com.google.protobuf.ByteString;
 import org.apache.ratis.util.LifeCycle;
 import org.apache.ratis.util.SizeInBytes;
 import org.apache.ratis.util.StringUtils;
 import org.apache.ratis.util.TimeDuration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import static org.apache.hadoop.hdds.HddsConfigKeys.OZONE_METADATA_DIRS;
+import static org.apache.hadoop.ipc.RpcConstants.DUMMY_CLIENT_ID;
+import static org.apache.hadoop.ipc.RpcConstants.INVALID_CALL_ID;
+import static org.apache.hadoop.ozone.OzoneConsts.OM_RATIS_SNAPSHOT_DIR;
+import static org.apache.hadoop.ozone.om.OMConfigKeys.OZONE_OM_HA_PREFIX;
+import static org.apache.hadoop.ozone.om.OMConfigKeys.OZONE_OM_RATIS_SNAPSHOT_DIR;
 
 /**
  * Creates a Ratis server endpoint for OM.
@@ -101,20 +107,6 @@ public final class OzoneManagerRatisServer {
 
   private final OzoneManager ozoneManager;
   private final OzoneManagerStateMachine omStateMachine;
-  private final ClientId clientId = ClientId.randomId();
-
-  private final ScheduledExecutorService scheduledRoleChecker;
-  private long roleCheckInitialDelayMs = 1000; // 1 second default
-  private long roleCheckIntervalMs;
-  private ReentrantReadWriteLock roleCheckLock = new ReentrantReadWriteLock();
-  private Optional<RaftPeerRole> cachedPeerRole = Optional.empty();
-  private Optional<RaftPeerId> cachedLeaderPeerId = Optional.empty();
-
-  private static final AtomicLong CALL_ID_COUNTER = new AtomicLong();
-
-  private static long nextCallId() {
-    return CALL_ID_COUNTER.getAndIncrement() & Long.MAX_VALUE;
-  }
 
   /**
    * Submit request to Ratis server.
@@ -125,15 +117,32 @@ public final class OzoneManagerRatisServer {
   public OMResponse submitRequest(OMRequest omRequest) throws ServiceException {
     RaftClientRequest raftClientRequest =
         createWriteRaftClientRequest(omRequest);
-    RaftClientReply raftClientReply;
+    RaftClientReply raftClientReply = submitRequestToRatis(raftClientRequest);
+    return processReply(omRequest, raftClientReply);
+  }
+
+  /**
+   * API used internally from OzoneManager Server when requests needs to be
+   * submitted to ratis, where the crafted RaftClientRequest is passed along.
+   * @param omRequest
+   * @param raftClientRequest
+   * @return OMResponse
+   * @throws ServiceException
+   */
+  public OMResponse submitRequest(OMRequest omRequest,
+      RaftClientRequest raftClientRequest) throws ServiceException {
+    RaftClientReply raftClientReply = submitRequestToRatis(raftClientRequest);
+    return processReply(omRequest, raftClientReply);
+  }
+
+  private RaftClientReply submitRequestToRatis(
+      RaftClientRequest raftClientRequest) throws ServiceException {
     try {
-      raftClientReply = server.submitClientRequestAsync(raftClientRequest)
+      return server.submitClientRequestAsync(raftClientRequest)
           .get();
     } catch (Exception ex) {
       throw new ServiceException(ex.getMessage(), ex);
     }
-
-    return processReply(omRequest, raftClientReply);
   }
 
   /**
@@ -143,10 +152,19 @@ public final class OzoneManagerRatisServer {
    * ratis server.
    */
   private RaftClientRequest createWriteRaftClientRequest(OMRequest omRequest) {
-    return new RaftClientRequest(clientId, server.getId(), raftGroupId,
-        nextCallId(),
-        Message.valueOf(OMRatisHelper.convertRequestToByteString(omRequest)),
-        RaftClientRequest.writeRequestType(), null);
+    Preconditions.checkArgument(Server.getClientId() != DUMMY_CLIENT_ID);
+    Preconditions.checkArgument(Server.getCallId() != INVALID_CALL_ID);
+    return RaftClientRequest.newBuilder()
+        .setClientId(
+            ClientId.valueOf(UUID.nameUUIDFromBytes(Server.getClientId())))
+        .setServerId(server.getId())
+        .setGroupId(raftGroupId)
+        .setCallId(Server.getCallId())
+        .setMessage(
+            Message.valueOf(
+                OMRatisHelper.convertRequestToByteString(omRequest)))
+        .setType(RaftClientRequest.writeRequestType())
+        .build();
   }
 
   /**
@@ -246,10 +264,12 @@ public final class OzoneManagerRatisServer {
    * @param raftPeers peer nodes in the raft ring
    * @throws IOException
    */
+  @SuppressWarnings({"parameternumber", "java:S107"})
   private OzoneManagerRatisServer(ConfigurationSource conf,
       OzoneManager om,
       String raftGroupIdStr, RaftPeerId localRaftPeerId,
-      InetSocketAddress addr, List<RaftPeer> raftPeers)
+      InetSocketAddress addr, List<RaftPeer> raftPeers,
+      SecurityConfig secConfig, CertificateClient certClient)
       throws IOException {
     this.ozoneManager = om;
     this.omRatisAddress = addr;
@@ -270,26 +290,14 @@ public final class OzoneManagerRatisServer {
 
     this.omStateMachine = getStateMachine(conf);
 
+    Parameters parameters = createServerTlsParameters(secConfig, certClient);
     this.server = RaftServer.newBuilder()
         .setServerId(this.raftPeerId)
         .setGroup(this.raftGroup)
         .setProperties(serverProperties)
+        .setParameters(parameters)
         .setStateMachine(omStateMachine)
         .build();
-
-    // Run a scheduler to check and update the server role on the leader
-    // periodically
-    this.scheduledRoleChecker = Executors.newSingleThreadScheduledExecutor();
-    this.scheduledRoleChecker.scheduleWithFixedDelay(new Runnable() {
-      @Override
-      public void run() {
-        // Run this check only on the leader OM
-        if (cachedPeerRole.isPresent() &&
-            cachedPeerRole.get() == RaftPeerRole.LEADER) {
-          updateServerRole();
-        }
-      }
-    }, roleCheckInitialDelayMs, roleCheckIntervalMs, TimeUnit.MILLISECONDS);
   }
 
   /**
@@ -297,47 +305,68 @@ public final class OzoneManagerRatisServer {
    */
   public static OzoneManagerRatisServer newOMRatisServer(
       ConfigurationSource ozoneConf, OzoneManager omProtocol,
-      OMNodeDetails omNodeDetails, List<OMNodeDetails> peerNodes)
+      OMNodeDetails omNodeDetails, List<OMNodeDetails> peerNodes,
+      SecurityConfig secConfig, CertificateClient certClient)
       throws IOException {
 
     // RaftGroupId is the omServiceId
-    String omServiceId = omNodeDetails.getOMServiceId();
+    String omServiceId = omNodeDetails.getServiceId();
 
-    String omNodeId = omNodeDetails.getOMNodeId();
+    String omNodeId = omNodeDetails.getNodeId();
     RaftPeerId localRaftPeerId = RaftPeerId.getRaftPeerId(omNodeId);
 
     InetSocketAddress ratisAddr = new InetSocketAddress(
-        omNodeDetails.getAddress(), omNodeDetails.getRatisPort());
+        omNodeDetails.getInetAddress(), omNodeDetails.getRatisPort());
 
-    RaftPeer localRaftPeer = new RaftPeer(localRaftPeerId, ratisAddr);
+    RaftPeer localRaftPeer = RaftPeer.newBuilder()
+        .setId(localRaftPeerId)
+        .setAddress(ratisAddr)
+        .build();
 
     List<RaftPeer> raftPeers = new ArrayList<>();
     // Add this Ratis server to the Ratis ring
     raftPeers.add(localRaftPeer);
 
     for (OMNodeDetails peerInfo : peerNodes) {
-      String peerNodeId = peerInfo.getOMNodeId();
-      InetSocketAddress peerRatisAddr = new InetSocketAddress(
-          peerInfo.getAddress(), peerInfo.getRatisPort());
+      String peerNodeId = peerInfo.getNodeId();
       RaftPeerId raftPeerId = RaftPeerId.valueOf(peerNodeId);
-      RaftPeer raftPeer = new RaftPeer(raftPeerId, peerRatisAddr);
+      RaftPeer raftPeer;
+      if (peerInfo.isHostUnresolved()) {
+        raftPeer = RaftPeer.newBuilder()
+            .setId(raftPeerId)
+            .setAddress(peerInfo.getRatisHostPortStr())
+            .build();
+      } else {
+        InetSocketAddress peerRatisAddr = new InetSocketAddress(
+            peerInfo.getInetAddress(), peerInfo.getRatisPort());
+        raftPeer = RaftPeer.newBuilder()
+            .setId(raftPeerId)
+            .setAddress(peerRatisAddr)
+            .build();
+      }
 
       // Add other OM nodes belonging to the same OM service to the Ratis ring
       raftPeers.add(raftPeer);
     }
 
     return new OzoneManagerRatisServer(ozoneConf, omProtocol, omServiceId,
-        localRaftPeerId, ratisAddr, raftPeers);
+        localRaftPeerId, ratisAddr, raftPeers, secConfig, certClient);
   }
 
   public RaftGroup getRaftGroup() {
     return this.raftGroup;
   }
 
+  @VisibleForTesting
+  public RaftServer getServer() {
+    return server;
+  }
+
   /**
    * Initializes and returns OzoneManager StateMachine.
    */
-  private OzoneManagerStateMachine getStateMachine(ConfigurationSource conf) {
+  private OzoneManagerStateMachine getStateMachine(ConfigurationSource conf)
+      throws IOException {
     return new OzoneManagerStateMachine(this,
         TracingUtil.isTracingEnabled(conf));
   }
@@ -393,6 +422,8 @@ public final class OzoneManagerRatisServer {
     String storageDir = OzoneManagerRatisServer.getOMRatisDirectory(conf);
     RaftServerConfigKeys.setStorageDir(properties,
         Collections.singletonList(new File(storageDir)));
+    // Disable the pre vote feature in Ratis
+    RaftServerConfigKeys.LeaderElection.setPreVote(properties, false);
 
     // Set RAFT segment size
     final int raftSegmentSize = (int) conf.getStorageSize(
@@ -401,6 +432,7 @@ public final class OzoneManagerRatisServer {
         StorageUnit.BYTES);
     RaftServerConfigKeys.Log.setSegmentSizeMax(properties,
         SizeInBytes.valueOf(raftSegmentSize));
+    RaftServerConfigKeys.Log.setPurgeUptoSnapshotIndex(properties, true);
 
     // Set RAFT segment pre-allocated size
     final int raftSegmentPreallocatedSize = (int) conf.getStorageSize(
@@ -468,7 +500,7 @@ public final class OzoneManagerRatisServer {
     long serverMaxTimeoutDuration =
         serverMinTimeout.toLong(TimeUnit.MILLISECONDS) + 200;
     final TimeDuration serverMaxTimeout = TimeDuration.valueOf(
-        serverMaxTimeoutDuration, serverMinTimeoutUnit);
+        serverMaxTimeoutDuration, TimeUnit.MILLISECONDS);
     RaftServerConfigKeys.Rpc.setTimeoutMin(properties,
         serverMinTimeout);
     RaftServerConfigKeys.Rpc.setTimeoutMax(properties,
@@ -478,23 +510,6 @@ public final class OzoneManagerRatisServer {
     RaftServerConfigKeys.Log.setSegmentCacheNumMax(properties, 2);
 
     // TODO: set max write buffer size
-
-    // Set the ratis leader election timeout
-    TimeUnit leaderElectionMinTimeoutUnit =
-        OMConfigKeys.OZONE_OM_LEADER_ELECTION_MINIMUM_TIMEOUT_DURATION_DEFAULT
-            .getUnit();
-    long leaderElectionMinTimeoutduration = conf.getTimeDuration(
-        OMConfigKeys.OZONE_OM_LEADER_ELECTION_MINIMUM_TIMEOUT_DURATION_KEY,
-        OMConfigKeys.OZONE_OM_LEADER_ELECTION_MINIMUM_TIMEOUT_DURATION_DEFAULT
-            .getDuration(), leaderElectionMinTimeoutUnit);
-    final TimeDuration leaderElectionMinTimeout = TimeDuration.valueOf(
-        leaderElectionMinTimeoutduration, leaderElectionMinTimeoutUnit);
-    RaftServerConfigKeys.Rpc.setTimeoutMin(properties,
-        leaderElectionMinTimeout);
-    long leaderElectionMaxTimeout = leaderElectionMinTimeout.toLong(
-        TimeUnit.MILLISECONDS) + 200;
-    RaftServerConfigKeys.Rpc.setTimeoutMax(properties,
-        TimeDuration.valueOf(leaderElectionMaxTimeout, TimeUnit.MILLISECONDS));
 
     TimeUnit nodeFailureTimeoutUnit =
         OMConfigKeys.OZONE_OM_RATIS_SERVER_FAILURE_TIMEOUT_DURATION_DEFAULT
@@ -510,132 +525,75 @@ public final class OzoneManagerRatisServer {
     RaftServerConfigKeys.Rpc.setSlownessTimeout(properties,
         nodeFailureTimeout);
 
-    TimeUnit roleCheckIntervalUnit =
-        OMConfigKeys.OZONE_OM_RATIS_SERVER_ROLE_CHECK_INTERVAL_DEFAULT
-            .getUnit();
-    long roleCheckIntervalDuration = conf.getTimeDuration(
-        OMConfigKeys.OZONE_OM_RATIS_SERVER_ROLE_CHECK_INTERVAL_KEY,
-        OMConfigKeys.OZONE_OM_RATIS_SERVER_ROLE_CHECK_INTERVAL_DEFAULT
-            .getDuration(), nodeFailureTimeoutUnit);
-    this.roleCheckIntervalMs = TimeDuration.valueOf(
-        roleCheckIntervalDuration, roleCheckIntervalUnit)
-        .toLong(TimeUnit.MILLISECONDS);
-    this.roleCheckInitialDelayMs = leaderElectionMinTimeout
-        .toLong(TimeUnit.MILLISECONDS);
+    // Set auto trigger snapshot. We don't need to configure auto trigger
+    // threshold in OM, as last applied index is flushed during double buffer
+    // flush automatically. (But added this property internally, so that this
+    // helps during testing, when want to trigger snapshots frequently, and
+    // which will purge logs when purge gap condition is satisfied and which
+    // will trigger installSnapshot when logs are cleaned up.)
+    // The transaction info value in OM DB is used as
+    // snapshot value after restart.
+
+    RaftServerConfigKeys.Snapshot.setAutoTriggerEnabled(
+        properties, true);
 
     long snapshotAutoTriggerThreshold = conf.getLong(
         OMConfigKeys.OZONE_OM_RATIS_SNAPSHOT_AUTO_TRIGGER_THRESHOLD_KEY,
         OMConfigKeys.OZONE_OM_RATIS_SNAPSHOT_AUTO_TRIGGER_THRESHOLD_DEFAULT);
-    RaftServerConfigKeys.Snapshot.setAutoTriggerEnabled(
-        properties, true);
-    RaftServerConfigKeys.Snapshot.setAutoTriggerThreshold(
-        properties, snapshotAutoTriggerThreshold);
 
+    RaftServerConfigKeys.Snapshot.setAutoTriggerThreshold(properties,
+        snapshotAutoTriggerThreshold);
+
+    createRaftServerProperties(conf, properties);
     return properties;
   }
 
-  /**
-   * Check the cached leader status.
-   * @return true if cached role is Leader, false otherwise.
-   */
-  private boolean checkCachedPeerRoleIsLeader() {
-    this.roleCheckLock.readLock().lock();
-    try {
-      if (cachedPeerRole.isPresent() &&
-          cachedPeerRole.get() == RaftPeerRole.LEADER) {
-        return true;
-      }
-      return false;
-    } finally {
-      this.roleCheckLock.readLock().unlock();
-    }
+  private void createRaftServerProperties(ConfigurationSource ozoneConf,
+      RaftProperties raftProperties) {
+    Map<String, String> ratisServerConf =
+        getOMHAConfigs(ozoneConf);
+    ratisServerConf.forEach((key, val) -> {
+      raftProperties.set(key, val);
+    });
+  }
+
+  private static Map<String, String> getOMHAConfigs(
+      ConfigurationSource configuration) {
+    return configuration.getPropsWithPrefix(OZONE_OM_HA_PREFIX + ".");
   }
 
   /**
-   * Check if the current OM node is the leader node.
-   * @return true if Leader, false otherwise.
+   * Defines RaftServer Status.
    */
-  public boolean isLeader() {
-    if (checkCachedPeerRoleIsLeader()) {
-      return true;
-    }
-
-    // Get the server role from ratis server and update the cached values.
-    updateServerRole();
-
-    // After updating the server role, check and return if leader or not.
-    return checkCachedPeerRoleIsLeader();
+  public enum RaftServerStatus {
+    NOT_LEADER,
+    LEADER_AND_NOT_READY,
+    LEADER_AND_READY;
   }
 
   /**
-   * Get the suggested leader peer id.
-   * @return RaftPeerId of the suggested leader node.
+   * Check Leader status and return the state of the RaftServer.
+   *
+   * @return RaftServerStatus.
    */
-  public Optional<RaftPeerId> getCachedLeaderPeerId() {
-    this.roleCheckLock.readLock().lock();
+  public RaftServerStatus checkLeaderStatus() {
     try {
-      return cachedLeaderPeerId;
-    } finally {
-      this.roleCheckLock.readLock().unlock();
-    }
-  }
-
-  /**
-   * Get the gorup info (peer role and leader peer id) from Ratis server and
-   * update the OM server role.
-   */
-  public void updateServerRole() {
-    try {
-      GroupInfoReply groupInfo = getGroupInfo();
-      RoleInfoProto roleInfoProto = groupInfo.getRoleInfoProto();
-      RaftPeerRole thisNodeRole = roleInfoProto.getRole();
-
-      if (thisNodeRole.equals(RaftPeerRole.LEADER)) {
-        setServerRole(thisNodeRole, raftPeerId);
-
-      } else if (thisNodeRole.equals(RaftPeerRole.FOLLOWER)) {
-        ByteString leaderNodeId = roleInfoProto.getFollowerInfo()
-            .getLeaderInfo().getId().getId();
-        // There may be a chance, here we get leaderNodeId as null. For
-        // example, in 3 node OM Ratis, if 2 OM nodes are down, there will
-        // be no leader.
-        RaftPeerId leaderPeerId = null;
-        if (leaderNodeId != null && !leaderNodeId.isEmpty()) {
-          leaderPeerId = RaftPeerId.valueOf(leaderNodeId);
+      RaftServer.Division division = server.getDivision(raftGroupId);
+      if (division != null) {
+        if (!division.getInfo().isLeader()) {
+          return RaftServerStatus.NOT_LEADER;
+        } else if (division.getInfo().isLeaderReady()) {
+          return RaftServerStatus.LEADER_AND_READY;
+        } else {
+          return RaftServerStatus.LEADER_AND_NOT_READY;
         }
-
-        setServerRole(thisNodeRole, leaderPeerId);
-
-      } else {
-        setServerRole(thisNodeRole, null);
-
       }
-    } catch (IOException e) {
-      LOG.error("Failed to retrieve RaftPeerRole. Setting cached role to " +
-          "{} and resetting leader info.", RaftPeerRole.UNRECOGNIZED, e);
-      setServerRole(null, null);
+    } catch (IOException ioe) {
+      // In this case we return not a leader.
+      LOG.error("Fail to get RaftServer impl and therefore it's not clear " +
+          "whether it's leader. ", ioe);
     }
-  }
-
-  /**
-   * Set the current server role and the leader peer id.
-   */
-  private void setServerRole(RaftPeerRole currentRole,
-      RaftPeerId leaderPeerId) {
-    this.roleCheckLock.writeLock().lock();
-    try {
-      this.cachedPeerRole = Optional.ofNullable(currentRole);
-      this.cachedLeaderPeerId = Optional.ofNullable(leaderPeerId);
-    } finally {
-      this.roleCheckLock.writeLock().unlock();
-    }
-  }
-
-  private GroupInfoReply getGroupInfo() throws IOException {
-    GroupInfoRequest groupInfoRequest = new GroupInfoRequest(clientId,
-        raftPeerId, raftGroupId, nextCallId());
-    GroupInfoReply groupInfo = server.getGroupInfo(groupInfoRequest);
-    return groupInfo;
+    return RaftServerStatus.NOT_LEADER;
   }
 
   public int getServerPort() {
@@ -669,11 +627,15 @@ public final class OzoneManagerRatisServer {
   }
 
   public static String getOMRatisSnapshotDirectory(ConfigurationSource conf) {
-    String snapshotDir = conf.get(OMConfigKeys.OZONE_OM_RATIS_SNAPSHOT_DIR);
+    String snapshotDir = conf.get(OZONE_OM_RATIS_SNAPSHOT_DIR);
 
+    // If ratis snapshot directory is not set, fall back to ozone.metadata.dir.
     if (Strings.isNullOrEmpty(snapshotDir)) {
-      snapshotDir = Paths.get(getOMRatisDirectory(conf),
-          "snapshot").toString();
+      LOG.warn("{} is not configured. Falling back to {} config",
+          OZONE_OM_RATIS_SNAPSHOT_DIR, OZONE_METADATA_DIRS);
+      File metaDirPath = ServerUtils.getOzoneMetaDirPath(conf);
+      snapshotDir = Paths.get(metaDirPath.getPath(),
+          OM_RATIS_SNAPSHOT_DIR).toString();
     }
     return snapshotDir;
   }
@@ -681,4 +643,28 @@ public final class OzoneManagerRatisServer {
   public TermIndex getLastAppliedTermIndex() {
     return omStateMachine.getLastAppliedTermIndex();
   }
+
+  public RaftGroupId getRaftGroupId() {
+    return raftGroupId;
+  }
+
+  private static Parameters createServerTlsParameters(SecurityConfig conf,
+      CertificateClient caClient) throws IOException {
+    Parameters parameters = new Parameters();
+
+    if (conf.isSecurityEnabled() && conf.isGrpcTlsEnabled()) {
+      List<X509Certificate> caList = HAUtils.buildCAX509List(caClient,
+          conf.getConfiguration());
+      GrpcTlsConfig config = new GrpcTlsConfig(
+          caClient.getPrivateKey(), caClient.getCertificate(),
+          caList, true);
+      GrpcConfigKeys.Server.setTlsConf(parameters, config);
+      GrpcConfigKeys.Admin.setTlsConf(parameters, config);
+      GrpcConfigKeys.Client.setTlsConf(parameters, config);
+      GrpcConfigKeys.TLS.setConf(parameters, config);
+    }
+
+    return parameters;
+  }
+
 }

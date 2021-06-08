@@ -35,6 +35,7 @@ import java.util.List;
 import java.util.Map;
 
 import org.apache.hadoop.hdds.client.BlockID;
+import org.apache.hadoop.hdds.client.StandaloneReplicationConfig;
 import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
 import org.apache.hadoop.hdds.scm.pipeline.Pipeline;
 import org.apache.hadoop.ozone.om.OMMetadataManager;
@@ -275,8 +276,8 @@ public class TestContainerKeyMapperTask {
         .setBucketName(bucket)
         .setVolumeName(volume)
         .setKeyName(key)
-        .setReplicationFactor(HddsProtos.ReplicationFactor.ONE)
-        .setReplicationType(HddsProtos.ReplicationType.STAND_ALONE)
+        .setReplicationConfig(
+            new StandaloneReplicationConfig(HddsProtos.ReplicationFactor.ONE))
         .setOmKeyLocationInfos(Collections.singletonList(
             omKeyLocationInfoGroup))
         .build();
@@ -291,7 +292,7 @@ public class TestContainerKeyMapperTask {
     when(tableMock.getName()).thenReturn("keyTable");
     when(omMetadataManagerMock.getKeyTable()).thenReturn(tableMock);
     when(omServiceProviderMock.getOMMetadataManagerInstance())
-      .thenReturn(omMetadataManagerMock);
+        .thenReturn(omMetadataManagerMock);
     return omServiceProviderMock;
   }
 }

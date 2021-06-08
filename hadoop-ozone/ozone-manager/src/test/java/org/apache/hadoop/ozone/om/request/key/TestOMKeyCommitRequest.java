@@ -54,6 +54,64 @@ public class TestOMKeyCommitRequest extends TestOMKeyRequest {
   }
 
   @Test
+  public void testValidateAndUpdateCacheWithUnknownBlockId() throws Exception {
+
+    OMRequest modifiedOmRequest =
+        doPreExecute(createCommitKeyRequest());
+
+    OMKeyCommitRequest omKeyCommitRequest =
+        new OMKeyCommitRequest(modifiedOmRequest);
+
+    // Append 3 blocks locations.
+    List<OmKeyLocationInfo> allocatedLocationList = getKeyLocation(3)
+        .stream().map(OmKeyLocationInfo::getFromProtobuf)
+        .collect(Collectors.toList());
+
+    TestOMRequestUtils.addVolumeAndBucketToDB(volumeName, bucketName,
+        omMetadataManager);
+
+    TestOMRequestUtils.addKeyToTable(true, volumeName, bucketName, keyName,
+        clientID, replicationType, replicationFactor, omMetadataManager,
+        allocatedLocationList);
+
+    String ozoneKey = omMetadataManager.getOzoneKey(volumeName, bucketName,
+        keyName);
+
+    // Key should not be there in key table, as validateAndUpdateCache is
+    // still not called.
+    OmKeyInfo omKeyInfo = omMetadataManager.getKeyTable().get(ozoneKey);
+
+    Assert.assertNull(omKeyInfo);
+
+    OMClientResponse omClientResponse =
+        omKeyCommitRequest.validateAndUpdateCache(ozoneManager,
+            100L, ozoneManagerDoubleBufferHelper);
+
+    Assert.assertEquals(OzoneManagerProtocolProtos.Status.OK,
+        omClientResponse.getOMResponse().getStatus());
+
+    // Entry should be deleted from openKey Table.
+    omKeyInfo = omMetadataManager.getOpenKeyTable().get(ozoneKey);
+    Assert.assertNull(omKeyInfo);
+
+    // Now entry should be created in key Table.
+    omKeyInfo = omMetadataManager.getKeyTable().get(ozoneKey);
+
+    Assert.assertNotNull(omKeyInfo);
+
+    // Check modification time
+
+    CommitKeyRequest commitKeyRequest = modifiedOmRequest.getCommitKeyRequest();
+    Assert.assertEquals(commitKeyRequest.getKeyArgs().getModificationTime(),
+        omKeyInfo.getModificationTime());
+
+    // Check block location.
+    Assert.assertEquals(allocatedLocationList,
+        omKeyInfo.getLatestVersionLocations().getLocationList());
+
+  }
+
+  @Test
   public void testValidateAndUpdateCache() throws Exception {
 
     OMRequest modifiedOmRequest =
@@ -62,11 +120,21 @@ public class TestOMKeyCommitRequest extends TestOMKeyRequest {
     OMKeyCommitRequest omKeyCommitRequest =
         new OMKeyCommitRequest(modifiedOmRequest);
 
+
+    KeyArgs keyArgs = modifiedOmRequest.getCommitKeyRequest().getKeyArgs();
+
+    // Append new blocks
+    List<OmKeyLocationInfo> allocatedLocationList =
+        keyArgs.getKeyLocationsList().stream()
+            .map(OmKeyLocationInfo::getFromProtobuf)
+            .collect(Collectors.toList());
+
     TestOMRequestUtils.addVolumeAndBucketToDB(volumeName, bucketName,
         omMetadataManager);
 
     TestOMRequestUtils.addKeyToTable(true, volumeName, bucketName, keyName,
-        clientID, replicationType, replicationFactor, omMetadataManager);
+        clientID, replicationType, replicationFactor, omMetadataManager,
+        allocatedLocationList);
 
     String ozoneKey = omMetadataManager.getOzoneKey(volumeName, bucketName,
         keyName);
@@ -106,6 +174,8 @@ public class TestOMKeyCommitRequest extends TestOMKeyRequest {
         .collect(Collectors.toList());
 
     Assert.assertEquals(locationInfoListFromCommitKeyRequest,
+        omKeyInfo.getLatestVersionLocations().getLocationList());
+    Assert.assertEquals(allocatedLocationList,
         omKeyInfo.getLatestVersionLocations().getLocationList());
 
   }
@@ -207,85 +277,6 @@ public class TestOMKeyCommitRequest extends TestOMKeyRequest {
     Assert.assertNull(omKeyInfo);
   }
 
-  @Test
-  public void testReplayRequest() throws Exception {
-
-    // Manually add Volume, Bucket to DB
-    TestOMRequestUtils.addVolumeAndBucketToDB(volumeName, bucketName,
-        omMetadataManager);
-    // Manually add Key to OpenKey table in DB
-    TestOMRequestUtils.addKeyToTable(true, false, volumeName, bucketName,
-        keyName, clientID, replicationType, replicationFactor, 1L,
-        omMetadataManager);
-
-    OMRequest modifiedOmRequest = doPreExecute(createCommitKeyRequest());
-
-    OMKeyCommitRequest omKeyCommitRequest = new OMKeyCommitRequest(
-        modifiedOmRequest);
-
-    String ozoneKey = omMetadataManager.getOzoneKey(volumeName, bucketName,
-        keyName);
-
-    // Key should not be there in key table, as validateAndUpdateCache is
-    // still not called.
-    OmKeyInfo omKeyInfo = omMetadataManager.getKeyTable().get(ozoneKey);
-    Assert.assertNull(omKeyInfo);
-
-    // Execute original KeyCommit request
-    omKeyCommitRequest.validateAndUpdateCache(ozoneManager, 10L,
-        ozoneManagerDoubleBufferHelper);
-
-    // Replay the transaction - Execute the createKey request again
-    OMClientResponse replayResponse = omKeyCommitRequest.validateAndUpdateCache(
-        ozoneManager, 10L, ozoneManagerDoubleBufferHelper);
-
-    // Replay should result in Replay response
-    Assert.assertEquals(OzoneManagerProtocolProtos.Status.REPLAY,
-        replayResponse.getOMResponse().getStatus());
-  }
-
-  @Test
-  public void testReplayRequestDeletesOpenKeyEntry() throws Exception {
-
-    // Manually add Volume, Bucket to DB
-    TestOMRequestUtils.addVolumeAndBucketToDB(volumeName, bucketName,
-        omMetadataManager);
-    // Manually add Key to OpenKey table in DB
-    TestOMRequestUtils.addKeyToTable(true, false, volumeName, bucketName,
-        keyName, clientID, replicationType, replicationFactor, 1L,
-        omMetadataManager);
-
-    OMRequest modifiedOmRequest = doPreExecute(createCommitKeyRequest());
-    OMKeyCommitRequest omKeyCommitRequest = new OMKeyCommitRequest(
-        modifiedOmRequest);
-
-    // Execute original KeyCommit request
-    omKeyCommitRequest.validateAndUpdateCache(ozoneManager, 10L,
-        ozoneManagerDoubleBufferHelper);
-
-    // Replay the Key Create request - add Key to OpenKey table manually again
-    TestOMRequestUtils.addKeyToTable(true, true, volumeName, bucketName,
-        keyName, clientID, replicationType, replicationFactor, 1L,
-        omMetadataManager);
-
-    // Key should be present in OpenKey table
-    String openKey = omMetadataManager.getOpenKey(volumeName, bucketName,
-        keyName, clientID);
-    OmKeyInfo openKeyInfo = omMetadataManager.getOpenKeyTable().get(openKey);
-    Assert.assertNotNull(openKeyInfo);
-
-    // Replay the transaction - Execute the createKey request again
-    OMClientResponse replayResponse = omKeyCommitRequest.validateAndUpdateCache(
-        ozoneManager, 10L, ozoneManagerDoubleBufferHelper);
-
-    // Replay should result in DELETE_OPEN_KEY_ONLY response and delete the
-    // key from OpenKey table
-    Assert.assertEquals(OzoneManagerProtocolProtos.Status.OK,
-        replayResponse.getOMResponse().getStatus());
-    openKeyInfo = omMetadataManager.getOpenKeyTable().get(openKey);
-    Assert.assertNull(openKeyInfo);
-  }
-
   /**
    * This method calls preExecute and verify the modified request.
    * @param originalOMRequest
@@ -343,7 +334,7 @@ public class TestOMKeyCommitRequest extends TestOMKeyRequest {
         KeyArgs.newBuilder().setDataSize(dataSize).setVolumeName(volumeName)
             .setKeyName(keyName).setBucketName(bucketName)
             .setType(replicationType).setFactor(replicationFactor)
-            .addAllKeyLocations(getKeyLocation()).build();
+            .addAllKeyLocations(getKeyLocation(5)).build();
 
     CommitKeyRequest commitKeyRequest =
         CommitKeyRequest.newBuilder().setKeyArgs(keyArgs)
@@ -358,10 +349,10 @@ public class TestOMKeyCommitRequest extends TestOMKeyRequest {
   /**
    * Create KeyLocation list.
    */
-  private List<KeyLocation> getKeyLocation() {
+  private List<KeyLocation> getKeyLocation(int count) {
     List<KeyLocation> keyLocations = new ArrayList<>();
 
-    for (int i=0; i < 5; i++) {
+    for (int i=0; i < count; i++) {
       KeyLocation keyLocation =
           KeyLocation.newBuilder()
               .setBlockID(HddsProtos.BlockID.newBuilder()

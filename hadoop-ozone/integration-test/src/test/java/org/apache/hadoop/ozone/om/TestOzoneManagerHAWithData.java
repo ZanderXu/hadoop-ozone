@@ -23,7 +23,6 @@ import org.apache.hadoop.ipc.RemoteException;
 import org.apache.hadoop.ozone.OzoneConfigKeys;
 import org.apache.hadoop.ozone.client.ObjectStore;
 import org.apache.hadoop.ozone.client.OzoneBucket;
-import org.apache.hadoop.ozone.client.OzoneKeyDetails;
 import org.apache.hadoop.ozone.client.OzoneMultipartUploadPartListParts;
 import org.apache.hadoop.ozone.client.OzoneVolume;
 import org.apache.hadoop.ozone.client.VolumeArgs;
@@ -33,11 +32,12 @@ import org.apache.hadoop.ozone.om.exceptions.OMException;
 import org.apache.hadoop.ozone.om.ha.OMFailoverProxyProvider;
 import org.apache.hadoop.ozone.om.helpers.OmMultipartInfo;
 import org.apache.hadoop.ozone.om.helpers.OmMultipartUploadCompleteInfo;
-import org.apache.hadoop.test.GenericTestUtils;
+import org.apache.ozone.test.GenericTestUtils;
 import org.junit.Assert;
 import org.junit.Ignore;
 import org.junit.Test;
 
+import java.io.IOException;
 import java.net.ConnectException;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -45,10 +45,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
-import static org.apache.hadoop.ozone.MiniOzoneHAClusterImpl.NODE_FAILURE_TIMEOUT;
+import static java.nio.charset.StandardCharsets.UTF_8;
+import static org.apache.hadoop.ozone.MiniOzoneOMHAClusterImpl.NODE_FAILURE_TIMEOUT;
 import static org.apache.hadoop.ozone.om.exceptions.OMException.ResultCodes.DIRECTORY_NOT_FOUND;
 import static org.apache.hadoop.ozone.om.exceptions.OMException.ResultCodes.FILE_ALREADY_EXISTS;
 import static org.apache.hadoop.ozone.om.exceptions.OMException.ResultCodes.NOT_A_FILE;
+import static org.apache.hadoop.ozone.om.exceptions.OMException.ResultCodes.PARTIAL_DELETE;
 import static org.junit.Assert.fail;
 
 /**
@@ -73,7 +75,7 @@ public class TestOzoneManagerHAWithData extends TestOzoneManagerHA {
   @Test
   public void testOneOMNodeDown() throws Exception {
     getCluster().stopOzoneManager(1);
-    Thread.sleep(NODE_FAILURE_TIMEOUT * 2);
+    Thread.sleep(NODE_FAILURE_TIMEOUT * 4);
 
     createVolumeTest(true);
 
@@ -88,7 +90,7 @@ public class TestOzoneManagerHAWithData extends TestOzoneManagerHA {
   public void testTwoOMNodesDown() throws Exception {
     getCluster().stopOzoneManager(1);
     getCluster().stopOzoneManager(2);
-    Thread.sleep(NODE_FAILURE_TIMEOUT * 2);
+    Thread.sleep(NODE_FAILURE_TIMEOUT * 4);
 
     createVolumeTest(false);
 
@@ -150,6 +152,46 @@ public class TestOzoneManagerHAWithData extends TestOzoneManagerHA {
 
   }
 
+  @Test
+  public void testKeysDelete() throws Exception {
+    OzoneBucket ozoneBucket = setupBucket();
+    String data = "random data";
+    String keyName1 = "dir/file1";
+    String keyName2 = "dir/file2";
+    String keyName3 = "dir/file3";
+    String keyName4 = "dir/file4";
+    List<String> keyList1 = new ArrayList<>();
+    keyList1.add(keyName2);
+    keyList1.add(keyName3);
+
+    testCreateFile(ozoneBucket, keyName1, data, true, false);
+    testCreateFile(ozoneBucket, keyName2, data, true, false);
+    testCreateFile(ozoneBucket, keyName3, data, true, false);
+    testCreateFile(ozoneBucket, keyName4, data, true, false);
+
+    // Delete keyName1 use deleteKey api.
+    ozoneBucket.deleteKey(keyName1);
+
+    // Delete keyName2 and keyName3 in keyList1 using the deleteKeys api.
+    ozoneBucket.deleteKeys(keyList1);
+
+    // In keyList2 keyName3 was previously deleted and KeyName4 exists .
+    List<String> keyList2 = new ArrayList<>();
+    keyList2.add(keyName3);
+    keyList2.add(keyName4);
+
+    // Because keyName3 has been deleted, there should be a KEY_NOT_FOUND
+    // exception. In this case, we test for deletion failure.
+    try {
+      ozoneBucket.deleteKeys(keyList2);
+      fail("testFilesDelete");
+    } catch (OMException ex) {
+      // The expected exception PARTIAL_DELETE, as if not able to delete, we
+      // return error codee PARTIAL_DElETE.
+      Assert.assertEquals(PARTIAL_DELETE, ex.getResult());
+    }
+  }
+
 
   @Test
   public void testFileOperationsWithNonRecursive() throws Exception {
@@ -208,42 +250,6 @@ public class TestOzoneManagerHAWithData extends TestOzoneManagerHA {
 
   }
 
-  /**
-   * This method createFile and verifies the file is successfully created or
-   * not.
-   * @param ozoneBucket
-   * @param keyName
-   * @param data
-   * @param recursive
-   * @param overwrite
-   * @throws Exception
-   */
-  public void testCreateFile(OzoneBucket ozoneBucket, String keyName,
-      String data, boolean recursive, boolean overwrite)
-      throws Exception {
-
-    OzoneOutputStream ozoneOutputStream = ozoneBucket.createFile(keyName,
-        data.length(), ReplicationType.RATIS, ReplicationFactor.ONE,
-        overwrite, recursive);
-
-    ozoneOutputStream.write(data.getBytes(), 0, data.length());
-    ozoneOutputStream.close();
-
-    OzoneKeyDetails ozoneKeyDetails = ozoneBucket.getKey(keyName);
-
-    Assert.assertEquals(keyName, ozoneKeyDetails.getName());
-    Assert.assertEquals(ozoneBucket.getName(), ozoneKeyDetails.getBucketName());
-    Assert.assertEquals(ozoneBucket.getVolumeName(),
-        ozoneKeyDetails.getVolumeName());
-    Assert.assertEquals(data.length(), ozoneKeyDetails.getDataSize());
-
-    OzoneInputStream ozoneInputStream = ozoneBucket.readKey(keyName);
-
-    byte[] fileContent = new byte[data.getBytes().length];
-    ozoneInputStream.read(fileContent);
-    Assert.assertEquals(data, new String(fileContent));
-  }
-
   @Test
   public void testMultipartUploadWithOneOmNodeDown() throws Exception {
 
@@ -266,7 +272,7 @@ public class TestOzoneManagerHAWithData extends TestOzoneManagerHA {
     // Stop one of the ozone manager, to see when the OM leader changes
     // multipart upload is happening successfully or not.
     getCluster().stopOzoneManager(leaderOMNodeId);
-    Thread.sleep(NODE_FAILURE_TIMEOUT * 2);
+    Thread.sleep(NODE_FAILURE_TIMEOUT * 4);
 
     createMultipartKeyAndReadKey(ozoneBucket, keyName, uploadID);
 
@@ -298,7 +304,7 @@ public class TestOzoneManagerHAWithData extends TestOzoneManagerHA {
     String leaderOMNodeId = omFailoverProxyProvider.getCurrentProxyOMNodeId();
 
     getCluster().stopOzoneManager(leaderOMNodeId);
-    Thread.sleep(NODE_FAILURE_TIMEOUT * 2);
+    Thread.sleep(NODE_FAILURE_TIMEOUT * 4);
     createKeyTest(true); // failover should happen to new node
 
     long numTimesTriedToSameNode = omFailoverProxyProvider.getWaitTime()
@@ -329,7 +335,7 @@ public class TestOzoneManagerHAWithData extends TestOzoneManagerHA {
     String value = "random data";
     OzoneOutputStream ozoneOutputStream = ozoneBucket.createMultipartKey(
         keyName, value.length(), 1, uploadID);
-    ozoneOutputStream.write(value.getBytes(), 0, value.length());
+    ozoneOutputStream.write(value.getBytes(UTF_8), 0, value.length());
     ozoneOutputStream.close();
 
 
@@ -344,9 +350,9 @@ public class TestOzoneManagerHAWithData extends TestOzoneManagerHA {
 
     OzoneInputStream ozoneInputStream = ozoneBucket.readKey(keyName);
 
-    byte[] fileContent = new byte[value.getBytes().length];
+    byte[] fileContent = new byte[value.getBytes(UTF_8).length];
     ozoneInputStream.read(fileContent);
-    Assert.assertEquals(value, new String(fileContent));
+    Assert.assertEquals(value, new String(fileContent, UTF_8));
   }
 
 
@@ -382,14 +388,14 @@ public class TestOzoneManagerHAWithData extends TestOzoneManagerHA {
       OzoneOutputStream ozoneOutputStream = ozoneBucket.createKey(keyName,
           value.length(), ReplicationType.STAND_ALONE,
           ReplicationFactor.ONE, new HashMap<>());
-      ozoneOutputStream.write(value.getBytes(), 0, value.length());
+      ozoneOutputStream.write(value.getBytes(UTF_8), 0, value.length());
       ozoneOutputStream.close();
 
       OzoneInputStream ozoneInputStream = ozoneBucket.readKey(keyName);
 
-      byte[] fileContent = new byte[value.getBytes().length];
+      byte[] fileContent = new byte[value.getBytes(UTF_8).length];
       ozoneInputStream.read(fileContent);
-      Assert.assertEquals(value, new String(fileContent));
+      Assert.assertEquals(value, new String(fileContent, UTF_8));
 
     } catch (ConnectException | RemoteException e) {
       if (!checkSuccess) {
@@ -442,8 +448,12 @@ public class TestOzoneManagerHAWithData extends TestOzoneManagerHA {
     }
 
     GenericTestUtils.waitFor(() -> {
-      if (ozoneManager.getRatisSnapshotIndex() > 0) {
-        return true;
+      try {
+        if (ozoneManager.getRatisSnapshotIndex() > 0) {
+          return true;
+        }
+      } catch (IOException ex) {
+        fail("test failed during transactionInfo read");
       }
       return false;
     }, 1000, 100000);
@@ -466,8 +476,12 @@ public class TestOzoneManagerHAWithData extends TestOzoneManagerHA {
     }
 
     GenericTestUtils.waitFor(() -> {
-      if (ozoneManager.getRatisSnapshotIndex() > 0) {
-        return true;
+      try {
+        if (ozoneManager.getRatisSnapshotIndex() > 0) {
+          return true;
+        }
+      } catch (IOException ex) {
+        fail("test failed during transactionInfo read");
       }
       return false;
     }, 1000, 100000);
@@ -491,9 +505,9 @@ public class TestOzoneManagerHAWithData extends TestOzoneManagerHA {
 
     // Get follower OMs
     OzoneManager followerOM1 = getCluster().getOzoneManager(
-        leaderOM.getPeerNodes().get(0).getOMNodeId());
+        leaderOM.getPeerNodes().get(0).getNodeId());
     OzoneManager followerOM2 = getCluster().getOzoneManager(
-        leaderOM.getPeerNodes().get(1).getOMNodeId());
+        leaderOM.getPeerNodes().get(1).getNodeId());
 
     // Do some transactions so that the log index increases
     String userName = "user" + RandomStringUtils.randomNumeric(5);
@@ -541,7 +555,7 @@ public class TestOzoneManagerHAWithData extends TestOzoneManagerHA {
     followerOM1.restart();
 
     // Get the latest snapshotIndex from the leader OM.
-    long leaderOMSnaphsotIndex = leaderOM.saveRatisSnapshot().getIndex();
+    long leaderOMSnaphsotIndex = leaderOM.getRatisSnapshotIndex();
 
     // The recently started OM should be lagging behind the leader OM.
     long followerOMLastAppliedIndex =
@@ -570,13 +584,6 @@ public class TestOzoneManagerHAWithData extends TestOzoneManagerHA {
     Assert.assertTrue(followerOM1lastAppliedIndex >
         leaderOMSnaphsotIndex);
 
-    // The follower OMs should be in sync. There can be a small lag between
-    // leader OM and follower OMs as txns are applied first on leader OM.
-    long followerOM2lastAppliedIndex = followerOM1.getOmRatisServer()
-        .getLastAppliedTermIndex().getIndex();
-    Assert.assertEquals(followerOM1lastAppliedIndex,
-        followerOM2lastAppliedIndex);
-
   }
 
   @Test
@@ -598,7 +605,7 @@ public class TestOzoneManagerHAWithData extends TestOzoneManagerHA {
 
     // Stop leader OM, and then validate list parts.
     stopLeaderOM();
-    Thread.sleep(NODE_FAILURE_TIMEOUT * 2);
+    Thread.sleep(NODE_FAILURE_TIMEOUT * 4);
 
     validateListParts(ozoneBucket, keyName, uploadID, partsMap);
 
@@ -645,7 +652,7 @@ public class TestOzoneManagerHAWithData extends TestOzoneManagerHA {
     String value = "random data";
     OzoneOutputStream ozoneOutputStream = ozoneBucket.createMultipartKey(
         keyName, value.length(), partNumber, uploadID);
-    ozoneOutputStream.write(value.getBytes(), 0, value.length());
+    ozoneOutputStream.write(value.getBytes(UTF_8), 0, value.length());
     ozoneOutputStream.close();
 
     return ozoneOutputStream.getCommitUploadPartInfo().getPartName();

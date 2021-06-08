@@ -228,15 +228,13 @@ BSD
 CDDL
 =====================
 
+   com.sun.istack:istack-commons-runtime
    com.sun.jersey:jersey-core
    com.sun.jersey:jersey-json
    com.sun.jersey:jersey-server
    com.sun.jersey:jersey-servlet
-   com.sun.xml.bind:jaxb-core
-   com.sun.xml.bind:jaxb-impl
    javax.activation:activation
    javax.servlet.jsp:jsp-api
-   javax.ws.rs:javax.ws.rs-api
    javax.ws.rs:jsr311-api
    javax.xml.bind:jaxb-api
    org.glassfish.hk2.external:aopalliance-repackaged
@@ -247,6 +245,9 @@ CDDL
    org.glassfish.hk2:hk2-locator
    org.glassfish.hk2:hk2-utils
    org.glassfish.hk2:osgi-resource-locator
+   org.glassfish.jaxb:jaxb-runtime
+   org.glassfish.jaxb:jaxb-core
+   org.glassfish.jaxb:txw2
    org.glassfish.jersey.containers:jersey-container-servlet
    org.glassfish.jersey.containers:jersey-container-servlet-core
    org.glassfish.jersey.core:jersey-client
@@ -257,7 +258,7 @@ CDDL
    org.glassfish.jersey.inject:jersey-hk2
    org.glassfish.jersey.media:jersey-media-jaxb
    org.glassfish.jersey.media:jersey-media-json-jackson
-
+   org.jvnet.staxex:stax-ex
 
 Apache License
 =====================
@@ -282,6 +283,7 @@ Apache License
    com.nimbusds:nimbus-jose-jwt
    com.squareup.okhttp3:okhttp
    com.squareup.okio:okio
+   com.sun.xml.fastinfoset:FastInfoset
    info.picocli:picocli
    io.dropwizard.metrics:metrics-core
    io.grpc:grpc-context
@@ -314,9 +316,8 @@ Apache License
    io.opentracing:opentracing-api
    io.opentracing:opentracing-noop
    io.opentracing:opentracing-util
+   jakarta.validation:jakarta.validation-api
    javax.enterprise:cdi-api
-   javax.inject:javax.inject
-   javax.validation:validation-api
    log4j:log4j
    net.minidev:accessors-smart
    net.minidev:json-smart
@@ -357,6 +358,7 @@ EPL 2.0
 =====================
 
    jakarta.annotation:jakarta.annotation-api
+   jakarta.ws.rs:jakarta.ws.rs-api
 
 
 CDDL + GPLv2 with classpath exception
@@ -372,7 +374,6 @@ Public Domain
 =====================
 
    aopalliance:aopalliance
-   org.tukaani:xz
 
 
 BSD 3-Clause
@@ -384,7 +385,6 @@ BSD 3-Clause
    com.google.re2j:re2j
    com.jcraft:jsch
    com.thoughtworks.paranamer:paranamer
-   org.fusesource.leveldbjni:leveldbjni-all
    org.ow2.asm:asm
 
 
@@ -395,7 +395,7 @@ BSD 2-Clause
 
 
 --------------------------------------------------------------------------------
-hadoop-hdds-server-scm, hadoop-ozone-ozone-manager, hadoop-ozone-s3gateway and hadoop-hdds-server-framework
+hdds-server-scm, ozone-manager, ozone-s3gateway and hdds-server-framework
 contains the source of the following javascript/css components (See licenses/ for text of these licenses):
 
 Apache Software Foundation License 2.0
@@ -421,10 +421,10 @@ MIT License
 bootstrap-3.4.1
 css/bootstrap-*
 bootstrap.min.js
-angular-route-1.6.4.min.js
+angular-route-1.8.0.min.js
 angular-nvd3-1.0.9.min.js
-angular-1.6.4.min.js
-jquery-3.4.1.min.js
+angular-1.8.0.min.js
+jquery-3.5.1.min.js
 
 --------------------------------------------------------------------------------
 recon server uses a huge number of javascript and css dependencies. See the

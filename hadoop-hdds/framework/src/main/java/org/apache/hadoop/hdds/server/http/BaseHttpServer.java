@@ -30,7 +30,7 @@ import org.apache.hadoop.hdds.HddsConfigKeys;
 import org.apache.hadoop.hdds.conf.ConfigurationSource;
 import org.apache.hadoop.hdds.conf.HddsConfServlet;
 import org.apache.hadoop.hdds.conf.HddsPrometheusConfig;
-import org.apache.hadoop.hdds.conf.OzoneConfiguration;
+import org.apache.hadoop.hdds.conf.MutableConfigurationSource;
 import org.apache.hadoop.hdds.utils.LegacyHadoopConfigurationSource;
 import org.apache.hadoop.metrics2.lib.DefaultMetricsSystem;
 import org.apache.hadoop.net.NetUtils;
@@ -42,6 +42,7 @@ import org.apache.hadoop.security.authorize.AccessControlList;
 import org.apache.commons.lang3.StringUtils;
 import static org.apache.hadoop.hdds.HddsUtils.getHostNameFromConfigKeys;
 import static org.apache.hadoop.hdds.HddsUtils.getPortNumberFromConfigKeys;
+import static org.apache.hadoop.hdds.HddsUtils.createDir;
 import static org.apache.hadoop.hdds.server.http.HttpConfig.getHttpPolicy;
 import static org.apache.hadoop.ozone.OzoneConfigKeys.OZONE_ADMINISTRATORS;
 import static org.apache.hadoop.ozone.OzoneConfigKeys.OZONE_CLIENT_HTTPS_NEED_AUTH_DEFAULT;
@@ -70,7 +71,7 @@ public abstract class BaseHttpServer {
       "org.eclipse.jetty.webapp.basetempdir";
 
   private HttpServer2 httpServer;
-  private final ConfigurationSource conf;
+  private final MutableConfigurationSource conf;
 
   private InetSocketAddress httpAddress;
   private InetSocketAddress httpsAddress;
@@ -84,7 +85,7 @@ public abstract class BaseHttpServer {
 
   private boolean profilerSupport;
 
-  public BaseHttpServer(ConfigurationSource conf, String name)
+  public BaseHttpServer(MutableConfigurationSource conf, String name)
       throws IOException {
     this.name = name;
     this.conf = conf;
@@ -115,9 +116,11 @@ public abstract class BaseHttpServer {
       if (isSecurityEnabled) {
         String httpAuthType = conf.get(getHttpAuthType(), "simple");
         LOG.info("HttpAuthType: {} = {}", getHttpAuthType(), httpAuthType);
+        // Ozone config prefix must be set to avoid AuthenticationFilter
+        // fall back to default one form hadoop.http.authentication.
+        builder.authFilterConfigurationPrefix(getHttpAuthConfigPrefix());
         if (httpAuthType.equals("kerberos")) {
           builder.setSecurityEnabled(true);
-          builder.authFilterConfigurationPrefix(getHttpAuthConfigPrefix());
           builder.setUsernameConfKey(getSpnegoPrincipal());
           builder.setKeytabConfKey(getKeytabFile());
         }
@@ -148,7 +151,7 @@ public abstract class BaseHttpServer {
         httpServer.getWebAppContext().getServletContext()
             .setAttribute(PROMETHEUS_SINK, prometheusMetricsSink);
         HddsPrometheusConfig prometheusConfig =
-            OzoneConfiguration.of(conf).getObject(HddsPrometheusConfig.class);
+            conf.getObject(HddsPrometheusConfig.class);
         String token = prometheusConfig.getPrometheusEndpointToken();
         if (StringUtils.isNotEmpty(token)) {
           httpServer.getWebAppContext().getServletContext()
@@ -175,6 +178,7 @@ public abstract class BaseHttpServer {
 
       String baseDir = conf.get(OzoneConfigKeys.OZONE_HTTP_BASEDIR);
       if (!StringUtils.isEmpty(baseDir)) {
+        createDir(baseDir);
         httpServer.getWebAppContext().setAttribute(JETTY_BASETMPDIR, baseDir);
         LOG.info("HTTP server of {} uses base directory {}", name, baseDir);
       }
@@ -186,7 +190,7 @@ public abstract class BaseHttpServer {
    * Recon to initialize their HTTP / HTTPS server.
    */
   public static HttpServer2.Builder newHttpServer2BuilderForOzone(
-      ConfigurationSource conf, final InetSocketAddress httpAddr,
+      MutableConfigurationSource conf, final InetSocketAddress httpAddr,
       final InetSocketAddress httpsAddr, String name) throws IOException {
     HttpConfig.Policy policy = getHttpPolicy(conf);
 
@@ -357,7 +361,7 @@ public abstract class BaseHttpServer {
    * clear text in config - if falling back is allowed.
    *
    * @param conf  Configuration instance
-   * @param alias name of the credential to retreive
+   * @param alias name of the credential to retrieve
    * @return String credential value or null
    */
   static String getPassword(ConfigurationSource conf, String alias) {

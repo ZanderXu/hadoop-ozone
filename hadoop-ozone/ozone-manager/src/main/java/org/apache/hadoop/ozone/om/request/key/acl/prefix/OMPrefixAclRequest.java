@@ -19,19 +19,21 @@
 package org.apache.hadoop.ozone.om.request.key.acl.prefix;
 
 import java.io.IOException;
+import java.util.Map;
 
 import com.google.common.base.Optional;
+import org.apache.hadoop.ozone.audit.AuditLogger;
 import org.apache.hadoop.ozone.om.OMMetadataManager;
 import org.apache.hadoop.ozone.om.OMMetrics;
 import org.apache.hadoop.ozone.om.OzoneManager;
 import org.apache.hadoop.ozone.om.PrefixManagerImpl;
 import org.apache.hadoop.ozone.om.PrefixManagerImpl.OMPrefixAclOpResult;
-import org.apache.hadoop.ozone.om.exceptions.OMReplayException;
 import org.apache.hadoop.ozone.om.helpers.OmPrefixInfo;
 import org.apache.hadoop.ozone.om.ratis.utils.OzoneManagerDoubleBufferHelper;
 import org.apache.hadoop.ozone.om.request.OMClientRequest;
+import org.apache.hadoop.ozone.om.request.util.ObjectParser;
 import org.apache.hadoop.ozone.om.response.OMClientResponse;
-import org.apache.hadoop.ozone.om.response.key.acl.prefix.OMPrefixAclResponse;
+import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.OMRequest;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.OMResponse;
 import org.apache.hadoop.ozone.security.acl.IAccessAuthorizer;
@@ -73,6 +75,11 @@ public abstract class OMPrefixAclRequest extends OMClientRequest {
         (PrefixManagerImpl) ozoneManager.getPrefixManager();
     try {
       String prefixPath = getOzoneObj().getPath();
+      ObjectParser objectParser = new ObjectParser(prefixPath,
+          OzoneManagerProtocolProtos.OzoneObj.ObjectType.PREFIX);
+      volume = objectParser.getVolume();
+      bucket = objectParser.getBucket();
+      key = objectParser.getKey();
 
       // check Acl
       if (ozoneManager.getAclsEnabled()) {
@@ -85,14 +92,6 @@ public abstract class OMPrefixAclRequest extends OMClientRequest {
           omMetadataManager.getLock().acquireWriteLock(PREFIX_LOCK, prefixPath);
 
       omPrefixInfo = omMetadataManager.getPrefixTable().get(prefixPath);
-
-      // Check if this transaction is a replay of ratis logs.
-      if (omPrefixInfo != null) {
-        if (isReplay(ozoneManager, omPrefixInfo, trxnLogIndex)) {
-          // This is a replayed transaction. Return dummy response.
-          throw new OMReplayException();
-        }
-      }
 
       try {
         operationResult = apply(prefixManager, omPrefixInfo, trxnLogIndex);
@@ -129,14 +128,9 @@ public abstract class OMPrefixAclRequest extends OMClientRequest {
       result = Result.SUCCESS;
 
     } catch (IOException ex) {
-      if (ex instanceof OMReplayException) {
-        result = Result.REPLAY;
-        omClientResponse = onReplay(omResponse);
-      } else {
-        result = Result.FAILURE;
-        exception = ex;
-        omClientResponse = onFailure(omResponse, ex);
-      }
+      result = Result.FAILURE;
+      exception = ex;
+      omClientResponse = onFailure(omResponse, ex);
     } finally {
       addResponseToDoubleBuffer(trxnLogIndex, omClientResponse,
           omDoubleBufferHelper);
@@ -146,8 +140,10 @@ public abstract class OMPrefixAclRequest extends OMClientRequest {
       }
     }
 
+    OzoneObj obj = getOzoneObj();
+    Map<String, String> auditMap = obj.toAuditMap();
     onComplete(opResult, exception, ozoneManager.getMetrics(), result,
-        trxnLogIndex);
+        trxnLogIndex, ozoneManager.getAuditLogger(), auditMap);
 
     return omClientResponse;
   }
@@ -187,15 +183,6 @@ public abstract class OMPrefixAclRequest extends OMClientRequest {
       IOException exception);
 
   /**
-   * Get the OM Client Response on replayed transactions.
-   * @param omResonse
-   * @return OMClientResponse
-   */
-  OMClientResponse onReplay(OMResponse.Builder omResonse) {
-    return new OMPrefixAclResponse(createReplayOMResponse(omResonse));
-  }
-
-  /**
    * Completion hook for final processing before return without lock.
    * Usually used for logging without lock and metric update.
    * @param operationResult
@@ -203,7 +190,8 @@ public abstract class OMPrefixAclRequest extends OMClientRequest {
    * @param omMetrics
    */
   abstract void onComplete(boolean operationResult, IOException exception,
-      OMMetrics omMetrics, Result result, long trxnLogIndex);
+      OMMetrics omMetrics, Result result, long trxnLogIndex,
+      AuditLogger auditLogger, Map<String, String> auditMap);
 
   /**
    * Apply the acl operation, if successfully completed returns true,

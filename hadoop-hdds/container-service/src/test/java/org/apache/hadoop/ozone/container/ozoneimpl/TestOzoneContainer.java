@@ -20,7 +20,6 @@ package org.apache.hadoop.ozone.container.ozoneimpl;
 
 
 import com.google.common.base.Preconditions;
-import com.google.common.primitives.Longs;
 import org.apache.hadoop.conf.StorageUnit;
 import org.apache.hadoop.hdds.HddsConfigKeys;
 import org.apache.hadoop.hdds.client.BlockID;
@@ -29,6 +28,8 @@ import org.apache.hadoop.hdds.protocol.DatanodeDetails;
 import org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos;
 import org.apache.hadoop.hdds.scm.ScmConfigKeys;
 import org.apache.hadoop.hdds.scm.container.common.helpers.StorageContainerException;
+import org.apache.hadoop.ozone.OzoneConfigKeys;
+import org.apache.hadoop.hdds.utils.db.Table;
 import org.apache.hadoop.ozone.OzoneConsts;
 import org.apache.hadoop.ozone.container.common.helpers.BlockData;
 import org.apache.hadoop.ozone.container.common.helpers.ChunkInfo;
@@ -44,11 +45,8 @@ import org.apache.hadoop.ozone.container.keyvalue.ChunkLayoutTestInfo;
 import org.apache.hadoop.ozone.container.keyvalue.KeyValueContainer;
 import org.apache.hadoop.ozone.container.keyvalue.KeyValueContainerData;
 import org.apache.hadoop.ozone.container.keyvalue.helpers.BlockUtils;
-import org.apache.hadoop.test.LambdaTestUtils;
-import org.junit.After;
-import org.junit.Before;
-import org.junit.Rule;
-import org.junit.Test;
+import org.apache.ozone.test.LambdaTestUtils;
+import org.junit.*;
 import org.junit.rules.TemporaryFolder;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
@@ -78,7 +76,7 @@ public class TestOzoneContainer {
   public TemporaryFolder folder = new TemporaryFolder();
 
   private OzoneConfiguration conf;
-  private String scmId = UUID.randomUUID().toString();
+  private String clusterId = UUID.randomUUID().toString();
   private MutableVolumeSet volumeSet;
   private RoundRobinVolumeChoosingPolicy volumeChoosingPolicy;
   private KeyValueContainerData keyValueContainerData;
@@ -106,7 +104,8 @@ public class TestOzoneContainer {
     conf.set(HddsConfigKeys.OZONE_METADATA_DIRS,
         folder.newFolder().getAbsolutePath());
     commitSpaceMap = new HashMap<String, Long>();
-    volumeSet = new MutableVolumeSet(datanodeDetails.getUuidString(), conf);
+    volumeSet = new MutableVolumeSet(datanodeDetails.getUuidString(), conf,
+        null);
     volumeChoosingPolicy = new RoundRobinVolumeChoosingPolicy();
   }
 
@@ -120,9 +119,10 @@ public class TestOzoneContainer {
 
   @Test
   public void testBuildContainerMap() throws Exception {
+
     // Format the volumes
     for (HddsVolume volume : volumeSet.getVolumesList()) {
-      volume.format(UUID.randomUUID().toString());
+      volume.format(clusterId);
       commitSpaceMap.put(getVolumeKey(volume), Long.valueOf(0));
     }
 
@@ -140,7 +140,7 @@ public class TestOzoneContainer {
           datanodeDetails.getUuidString());
       keyValueContainer = new KeyValueContainer(
           keyValueContainerData, conf);
-      keyValueContainer.create(volumeSet, volumeChoosingPolicy, scmId);
+      keyValueContainer.create(volumeSet, volumeChoosingPolicy, clusterId);
       myVolume = keyValueContainer.getContainerData().getVolume();
 
       freeBytes = addBlocks(keyValueContainer, 2, 3);
@@ -150,6 +150,7 @@ public class TestOzoneContainer {
       Preconditions.checkState(freeBytes >= 0);
       commitSpaceMap.put(getVolumeKey(myVolume),
           Long.valueOf(volCommitBytes + freeBytes));
+      BlockUtils.removeDB(keyValueContainerData, conf);
     }
 
     DatanodeStateMachine stateMachine = Mockito.mock(
@@ -168,6 +169,51 @@ public class TestOzoneContainer {
 
     verifyCommittedSpace(ozoneContainer);
   }
+
+  @Test
+  public void testBuildNodeReport() throws Exception {
+    String path = folder.getRoot()
+            .getAbsolutePath();
+    conf.set(OzoneConfigKeys.DFS_CONTAINER_RATIS_DATANODE_STORAGE_DIR,
+            String.join(",",
+            path + "/ratis1", path + "/ratis2", path + "ratis3"));
+    DatanodeStateMachine stateMachine = Mockito.mock(
+            DatanodeStateMachine.class);
+    StateContext context = Mockito.mock(StateContext.class);
+    Mockito.when(stateMachine.getDatanodeDetails()).thenReturn(datanodeDetails);
+    Mockito.when(context.getParent()).thenReturn(stateMachine);
+    // When OzoneContainer is started, the containers from disk should be
+    // loaded into the containerSet.
+    // Also expected to initialize committed space for each volume.
+    OzoneContainer ozoneContainer = new
+            OzoneContainer(datanodeDetails, conf, context, null);
+    Assert.assertEquals(volumeSet.getVolumesList().size(),
+            ozoneContainer.getNodeReport().getStorageReportList().size());
+    Assert.assertEquals(3,
+            ozoneContainer.getNodeReport().getMetadataStorageReportList()
+                    .size());
+
+  }
+
+  @Test
+  public void testBuildNodeReportWithDefaultRatisLogDir() throws Exception {
+    DatanodeStateMachine stateMachine = Mockito.mock(
+            DatanodeStateMachine.class);
+    StateContext context = Mockito.mock(StateContext.class);
+    Mockito.when(stateMachine.getDatanodeDetails()).thenReturn(datanodeDetails);
+    Mockito.when(context.getParent()).thenReturn(stateMachine);
+    // When OzoneContainer is started, the containers from disk should be
+    // loaded into the containerSet.
+    // Also expected to initialize committed space for each volume.
+    OzoneContainer ozoneContainer = new
+            OzoneContainer(datanodeDetails, conf, context, null);
+    Assert.assertEquals(volumeSet.getVolumesList().size(),
+            ozoneContainer.getNodeReport().getStorageReportList().size());
+    Assert.assertEquals(1,
+            ozoneContainer.getNodeReport().getMetadataStorageReportList()
+                    .size());
+  }
+
 
   @Test
   public void testContainerCreateDiskFull() throws Exception {
@@ -190,7 +236,8 @@ public class TestOzoneContainer {
     // we expect an out of space Exception
     StorageContainerException e = LambdaTestUtils.intercept(
         StorageContainerException.class,
-        () -> keyValueContainer.create(volumeSet, volumeChoosingPolicy, scmId)
+        () -> keyValueContainer.
+            create(volumeSet, volumeChoosingPolicy, clusterId)
     );
     if (!DISK_OUT_OF_SPACE.equals(e.getResult())) {
       LOG.info("Unexpected error during container creation", e);
@@ -221,6 +268,9 @@ public class TestOzoneContainer {
     ReferenceCountedDB db = BlockUtils.getDB(container
         .getContainerData(), conf);
 
+    Table<String, Long> metadataTable = db.getStore().getMetadataTable();
+    Table<String, BlockData> blockDataTable = db.getStore().getBlockDataTable();
+
     for (int bi = 0; bi < blocks; bi++) {
       // Creating BlockData
       BlockID blockID = new BlockID(containerId, bi);
@@ -230,23 +280,21 @@ public class TestOzoneContainer {
       chunkList.clear();
       for (int ci = 0; ci < chunksPerBlock; ci++) {
         String chunkName = strBlock + bi + strChunk + ci;
-        long offset = ci * datalen;
+        long offset = ci * (long) datalen;
         ChunkInfo info = new ChunkInfo(chunkName, offset, datalen);
         usedBytes += datalen;
         chunkList.add(info.getProtoBufMessage());
       }
       blockData.setChunks(chunkList);
-      db.getStore().put(Longs.toByteArray(blockID.getLocalID()),
-          blockData.getProtoBufMessage().toByteArray());
+      blockDataTable.put(Long.toString(blockID.getLocalID()), blockData);
     }
 
     // Set Block count and used bytes.
-    db.getStore().put(OzoneConsts.DB_BLOCK_COUNT_KEY,
-        Longs.toByteArray(blocks));
-    db.getStore().put(OzoneConsts.DB_CONTAINER_BYTES_USED_KEY,
-        Longs.toByteArray(usedBytes));
+    metadataTable.put(OzoneConsts.BLOCK_COUNT, (long)blocks);
+    metadataTable.put(OzoneConsts.CONTAINER_BYTES_USED, usedBytes);
 
     // remaining available capacity of the container
+    db.close();
     return (freeBytes - usedBytes);
   }
 
@@ -260,8 +308,6 @@ public class TestOzoneContainer {
         random.nextInt(256) + "." + random.nextInt(256) + "." + random
             .nextInt(256) + "." + random.nextInt(256);
 
-    String uuid = UUID.randomUUID().toString();
-    String hostName = uuid;
     DatanodeDetails.Port containerPort = DatanodeDetails.newPort(
         DatanodeDetails.Port.Name.STANDALONE, 0);
     DatanodeDetails.Port ratisPort = DatanodeDetails.newPort(
@@ -269,7 +315,7 @@ public class TestOzoneContainer {
     DatanodeDetails.Port restPort = DatanodeDetails.newPort(
         DatanodeDetails.Port.Name.REST, 0);
     DatanodeDetails.Builder builder = DatanodeDetails.newBuilder();
-    builder.setUuid(uuid)
+    builder.setUuid(UUID.randomUUID())
         .setHostName("localhost")
         .setIpAddress(ipAddress)
         .addPort(containerPort)

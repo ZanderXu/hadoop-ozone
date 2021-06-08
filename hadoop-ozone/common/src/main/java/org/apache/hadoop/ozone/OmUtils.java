@@ -17,6 +17,9 @@
 
 package org.apache.hadoop.ozone;
 
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;
+import com.google.protobuf.ServiceException;
 import java.io.File;
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -33,21 +36,26 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
 
-import org.apache.hadoop.conf.Configuration;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hdds.conf.ConfigurationSource;
 import org.apache.hadoop.hdds.conf.OzoneConfiguration;
 import org.apache.hadoop.hdds.scm.client.HddsClientUtils;
+import org.apache.hadoop.ipc.RemoteException;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.ozone.conf.OMClientConfig;
+import org.apache.hadoop.ozone.ha.ConfUtils;
 import org.apache.hadoop.ozone.om.exceptions.OMException;
 import org.apache.hadoop.ozone.om.helpers.OmKeyInfo;
 import org.apache.hadoop.ozone.om.helpers.RepeatedOmKeyInfo;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos;
+import org.apache.hadoop.security.AccessControlException;
+import org.apache.hadoop.security.token.SecretManager;
 
-import com.google.common.base.Joiner;
 import org.apache.commons.lang3.StringUtils;
 import static org.apache.hadoop.hdds.HddsUtils.getHostNameFromConfigKeys;
 import static org.apache.hadoop.hdds.HddsUtils.getPortNumberFromConfigKeys;
+import static org.apache.hadoop.ozone.OzoneConsts.OM_KEY_PREFIX;
 import static org.apache.hadoop.ozone.om.OMConfigKeys.OZONE_OM_ADDRESS_KEY;
 import static org.apache.hadoop.ozone.om.OMConfigKeys.OZONE_OM_BIND_HOST_DEFAULT;
 import static org.apache.hadoop.ozone.om.OMConfigKeys.OZONE_OM_HTTPS_ADDRESS_KEY;
@@ -56,9 +64,11 @@ import static org.apache.hadoop.ozone.om.OMConfigKeys.OZONE_OM_HTTPS_BIND_PORT_D
 import static org.apache.hadoop.ozone.om.OMConfigKeys.OZONE_OM_HTTP_ADDRESS_KEY;
 import static org.apache.hadoop.ozone.om.OMConfigKeys.OZONE_OM_HTTP_BIND_HOST_KEY;
 import static org.apache.hadoop.ozone.om.OMConfigKeys.OZONE_OM_HTTP_BIND_PORT_DEFAULT;
+import static org.apache.hadoop.ozone.om.OMConfigKeys.OZONE_OM_INTERNAL_SERVICE_ID;
 import static org.apache.hadoop.ozone.om.OMConfigKeys.OZONE_OM_NODES_KEY;
 import static org.apache.hadoop.ozone.om.OMConfigKeys.OZONE_OM_PORT_DEFAULT;
 import static org.apache.hadoop.ozone.om.OMConfigKeys.OZONE_OM_SERVICE_IDS_KEY;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -70,6 +80,18 @@ public final class OmUtils {
   public static final Logger LOG = LoggerFactory.getLogger(OmUtils.class);
   private static final SecureRandom SRAND = new SecureRandom();
   private static byte[] randomBytes = new byte[32];
+
+  private static final long TRANSACTION_ID_SHIFT = 8;
+  // from the 64 bits of ObjectID (long variable), 2 bits are reserved for
+  // epoch and 8 bits for recursive directory creation, if required. This
+  // leaves 54 bits for the transaction ID. Also, the last transaction ID is
+  // reserved for creating S3G volume on OM start {@link
+  // OzoneManager#addS3GVolumeToDB()}.
+  public static final long EPOCH_ID_SHIFT = 62; // 64 - 2
+  public static final long REVERSE_EPOCH_ID_SHIFT = 2; // 64 - EPOCH_ID_SHIFT
+  public static final long MAX_TRXN_ID = (1L << 54) - 2;
+  public static final int EPOCH_WHEN_RATIS_NOT_ENABLED = 1;
+  public static final int EPOCH_WHEN_RATIS_ENABLED = 2;
 
   private OmUtils() {
   }
@@ -99,7 +121,7 @@ public final class OmUtils {
       }
       for (String nodeId : getOMNodeIds(conf, serviceId)) {
         String rpcAddr = getOmRpcAddress(conf,
-            addKeySuffixes(OZONE_OM_ADDRESS_KEY, serviceId, nodeId));
+            ConfUtils.addKeySuffixes(OZONE_OM_ADDRESS_KEY, serviceId, nodeId));
         if (rpcAddr != null) {
           result.get(serviceId).add(NetUtils.createSocketAddr(rpcAddr));
         } else {
@@ -246,7 +268,9 @@ public final class OmUtils {
     case DeleteBucket:
     case CreateKey:
     case RenameKey:
+    case RenameKeys:
     case DeleteKey:
+    case DeleteKeys:
     case CommitKey:
     case AllocateBlock:
     case InitiateMultiPartUpload:
@@ -264,6 +288,8 @@ public final class OmUtils {
     case AddAcl:
     case PurgeKeys:
     case RecoverTrash:
+    case DeleteOpenKeys:
+    case RevokeS3Secret:
       return false;
     default:
       LOG.error("CmdType {} is not categorized as readOnly or not.", cmdType);
@@ -293,49 +319,11 @@ public final class OmUtils {
   }
 
   /**
-   * Add non empty and non null suffix to a key.
-   */
-  private static String addSuffix(String key, String suffix) {
-    if (suffix == null || suffix.isEmpty()) {
-      return key;
-    }
-    assert !suffix.startsWith(".") :
-        "suffix '" + suffix + "' should not already have '.' prepended.";
-    return key + "." + suffix;
-  }
-
-  /**
-   * Concatenate list of suffix strings '.' separated.
-   */
-  private static String concatSuffixes(String... suffixes) {
-    if (suffixes == null) {
-      return null;
-    }
-    return Joiner.on(".").skipNulls().join(suffixes);
-  }
-
-  /**
-   * Return configuration key of format key.suffix1.suffix2...suffixN.
-   */
-  public static String addKeySuffixes(String key, String... suffixes) {
-    String keySuffix = concatSuffixes(suffixes);
-    return addSuffix(key, keySuffix);
-  }
-
-  /**
-   * Match input address to local address.
-   * Return true if it matches, false otherwsie.
-   */
-  public static boolean isAddressLocal(InetSocketAddress addr) {
-    return NetUtils.isLocalAddress(addr.getAddress());
-  }
-
-  /**
    * Get a collection of all omNodeIds for the given omServiceId.
    */
   public static Collection<String> getOMNodeIds(ConfigurationSource conf,
       String omServiceId) {
-    String key = addSuffix(OZONE_OM_NODES_KEY, omServiceId);
+    String key = ConfUtils.addSuffix(OZONE_OM_NODES_KEY, omServiceId);
     return conf.getTrimmedStringCollection(key);
   }
 
@@ -352,8 +340,6 @@ public final class OmUtils {
     }
   }
 
-
-
   /**
    * If a OM conf is only set with key suffixed with OM Node ID, return the
    * set value.
@@ -362,7 +348,7 @@ public final class OmUtils {
    */
   public static String getConfSuffixedWithOMNodeId(ConfigurationSource conf,
       String confKey, String omServiceID, String omNodeId) {
-    String suffixedConfKey = OmUtils.addKeySuffixes(
+    String suffixedConfKey = ConfUtils.addKeySuffixes(
         confKey, omServiceID, omNodeId);
     String confValue = conf.getTrimmed(suffixedConfKey);
     if (StringUtils.isNotEmpty(confValue)) {
@@ -381,13 +367,16 @@ public final class OmUtils {
   public static String getHttpAddressForOMPeerNode(ConfigurationSource conf,
       String omServiceId, String omNodeId, String omNodeHostAddr) {
     final Optional<String> bindHost = getHostNameFromConfigKeys(conf,
-        addKeySuffixes(OZONE_OM_HTTP_BIND_HOST_KEY, omServiceId, omNodeId));
+        ConfUtils.addKeySuffixes(
+            OZONE_OM_HTTP_BIND_HOST_KEY, omServiceId, omNodeId));
 
     final OptionalInt addressPort = getPortNumberFromConfigKeys(conf,
-        addKeySuffixes(OZONE_OM_HTTP_ADDRESS_KEY, omServiceId, omNodeId));
+        ConfUtils.addKeySuffixes(
+            OZONE_OM_HTTP_ADDRESS_KEY, omServiceId, omNodeId));
 
     final Optional<String> addressHost = getHostNameFromConfigKeys(conf,
-        addKeySuffixes(OZONE_OM_HTTP_ADDRESS_KEY, omServiceId, omNodeId));
+        ConfUtils.addKeySuffixes(
+            OZONE_OM_HTTP_ADDRESS_KEY, omServiceId, omNodeId));
 
     String hostName = bindHost.orElse(addressHost.orElse(omNodeHostAddr));
 
@@ -404,13 +393,16 @@ public final class OmUtils {
   public static String getHttpsAddressForOMPeerNode(ConfigurationSource conf,
       String omServiceId, String omNodeId, String omNodeHostAddr) {
     final Optional<String> bindHost = getHostNameFromConfigKeys(conf,
-        addKeySuffixes(OZONE_OM_HTTPS_BIND_HOST_KEY, omServiceId, omNodeId));
+        ConfUtils.addKeySuffixes(
+            OZONE_OM_HTTPS_BIND_HOST_KEY, omServiceId, omNodeId));
 
     final OptionalInt addressPort = getPortNumberFromConfigKeys(conf,
-        addKeySuffixes(OZONE_OM_HTTPS_ADDRESS_KEY, omServiceId, omNodeId));
+        ConfUtils.addKeySuffixes(
+            OZONE_OM_HTTPS_ADDRESS_KEY, omServiceId, omNodeId));
 
     final Optional<String> addressHost = getHostNameFromConfigKeys(conf,
-        addKeySuffixes(OZONE_OM_HTTPS_ADDRESS_KEY, omServiceId, omNodeId));
+        ConfUtils.addKeySuffixes(
+            OZONE_OM_HTTPS_ADDRESS_KEY, omServiceId, omNodeId));
 
     String hostName = bindHost.orElse(addressHost.orElse(omNodeHostAddr));
 
@@ -498,9 +490,8 @@ public final class OmUtils {
   /**
    * Return OM Client Rpc Time out.
    */
-  public static long getOMClientRpcTimeOut(Configuration configuration) {
-    return OzoneConfiguration.of(configuration)
-        .getObject(OMClientConfig.class).getRpcTimeOut();
+  public static long getOMClientRpcTimeOut(ConfigurationSource configuration) {
+    return configuration.getObject(OMClientConfig.class).getRpcTimeOut();
   }
 
   /**
@@ -515,5 +506,163 @@ public final class OmUtils {
     } else {
       return null;
     }
+  }
+
+  public static int getOMEpoch(boolean isRatisEnabled) {
+    return isRatisEnabled ? EPOCH_WHEN_RATIS_ENABLED :
+        EPOCH_WHEN_RATIS_NOT_ENABLED;
+  }
+
+  /**
+   * Get the valid base object id given the transaction id.
+   * @param epoch a 2 bit epoch number. The 2 most significant bits of the
+   *              object will be set to this epoch.
+   * @param txId of the transaction. This value cannot exceed 2^54 - 1 as
+   *           out of the 64 bits for a long, 2 are reserved for the epoch
+   *           and 8 for recursive directory creation.
+   * @return base object id allocated against the transaction
+   */
+  public static long getObjectIdFromTxId(long epoch, long txId) {
+    Preconditions.checkArgument(txId <= MAX_TRXN_ID, "TransactionID " +
+        "exceeds max limit of " + MAX_TRXN_ID);
+    return addEpochToTxId(epoch, txId);
+  }
+
+  /**
+   * Note - This function should not be called directly. It is directly called
+   * only from OzoneManager#addS3GVolumeToDB() which is a one time operation
+   * when OM is started first time to add S3G volume. In call other cases,
+   * getObjectIdFromTxId() should be called to append epoch to objectID.
+   */
+  public static long addEpochToTxId(long epoch, long txId) {
+    long lsb54 = txId << TRANSACTION_ID_SHIFT;
+    long msb2 = epoch << EPOCH_ID_SHIFT;
+
+    return msb2 | lsb54;
+  }
+
+  /**
+   * Given an objectId, unset the 2 most significant bits to get the
+   * corresponding transaction index.
+   */
+  @VisibleForTesting
+  public static long getTxIdFromObjectId(long objectId) {
+    return ((Long.MAX_VALUE >> REVERSE_EPOCH_ID_SHIFT) & objectId)
+        >> TRANSACTION_ID_SHIFT;
+  }
+
+  /**
+   * Verify key name is a valid name.
+   */
+  public static void validateKeyName(String keyName)
+          throws OMException {
+    try {
+      HddsClientUtils.verifyKeyName(keyName);
+    } catch (IllegalArgumentException e) {
+      throw new OMException(e.getMessage(),
+              OMException.ResultCodes.INVALID_KEY_NAME);
+    }
+  }
+
+  /**
+   * Return configured OzoneManager service id based on the following logic.
+   * Look at 'ozone.om.internal.service.id' first. If configured, return that.
+   * If the above is not configured, look at 'ozone.om.service.ids'.
+   * If count(ozone.om.service.ids) == 1, return that id.
+   * If count(ozone.om.service.ids) > 1 throw exception
+   * If 'ozone.om.service.ids' is not configured, return null. (Non HA)
+   * @param conf configuration
+   * @return OM service ID.
+   * @throws IOException on error.
+   */
+  public static String getOzoneManagerServiceId(OzoneConfiguration conf)
+      throws IOException {
+    String localOMServiceId = conf.get(OZONE_OM_INTERNAL_SERVICE_ID);
+    Collection<String> omServiceIds = conf.getTrimmedStringCollection(
+        OZONE_OM_SERVICE_IDS_KEY);
+    if (localOMServiceId == null) {
+      LOG.info("{} is not defined, falling back to {} to find serviceID for "
+              + "OzoneManager if it is HA enabled cluster",
+          OZONE_OM_INTERNAL_SERVICE_ID, OZONE_OM_SERVICE_IDS_KEY);
+      if (omServiceIds.size() > 1) {
+        throw new IOException(String.format(
+            "More than 1 OzoneManager ServiceID (%s) " +
+                "configured : %s, but %s is not " +
+                "configured.", OZONE_OM_SERVICE_IDS_KEY,
+            omServiceIds.toString(), OZONE_OM_INTERNAL_SERVICE_ID));
+      }
+    } else if (!omServiceIds.contains(localOMServiceId)) {
+      throw new IOException(String.format(
+          "Cannot find the internal service id %s in %s",
+          localOMServiceId, omServiceIds.toString()));
+    } else {
+      omServiceIds = Collections.singletonList(localOMServiceId);
+    }
+
+    if (omServiceIds.isEmpty()) {
+      LOG.info("No OzoneManager ServiceID configured.");
+      return null;
+    } else {
+      String serviceId = omServiceIds.iterator().next();
+      LOG.info("Using OzoneManager ServiceID '{}'.", serviceId);
+      return serviceId;
+    }
+  }
+
+  /**
+   * Unwrap exception to check if it is some kind of access control problem
+   * ({@link AccessControlException} or {@link SecretManager.InvalidToken}).
+   */
+  public static boolean isAccessControlException(Exception ex) {
+    if (ex instanceof ServiceException) {
+      Throwable t = ex.getCause();
+      if (t instanceof RemoteException) {
+        t = ((RemoteException) t).unwrapRemoteException();
+      }
+      while (t != null) {
+        if (t instanceof AccessControlException ||
+            t instanceof SecretManager.InvalidToken) {
+          return true;
+        }
+        t = t.getCause();
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Normalize the key name. This method used {@link Path} to
+   * normalize the key name.
+   * @param keyName
+   * @param preserveTrailingSlash - if True preserves trailing slash, else
+   * does not preserve.
+   * @return normalized key name.
+   */
+  @SuppressFBWarnings("DMI_HARDCODED_ABSOLUTE_FILENAME")
+  public static String normalizeKey(String keyName,
+      boolean preserveTrailingSlash) {
+    // For empty strings do nothing, just return the same.
+    // Reason to check here is the Paths method fail with NPE.
+    if (!StringUtils.isBlank(keyName)) {
+      String normalizedKeyName;
+      if (keyName.startsWith(OM_KEY_PREFIX)) {
+        normalizedKeyName = new Path(keyName).toUri().getPath();
+      } else {
+        normalizedKeyName = new Path(OM_KEY_PREFIX + keyName)
+            .toUri().getPath();
+      }
+      if (!keyName.equals(normalizedKeyName)) {
+        LOG.debug("Normalized key {} to {} ", keyName,
+            normalizedKeyName.substring(1));
+      }
+      if (preserveTrailingSlash) {
+        if (keyName.endsWith("/")) {
+          return normalizedKeyName.substring(1) + "/";
+        }
+      }
+      return normalizedKeyName.substring(1);
+    }
+
+    return keyName;
   }
 }

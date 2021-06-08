@@ -28,25 +28,29 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import org.apache.hadoop.hdds.HddsUtils;
 import org.apache.hadoop.hdds.StringUtils;
 import org.apache.hadoop.hdds.utils.RocksDBStoreMBean;
+import org.apache.hadoop.hdds.utils.db.cache.TableCache;
 import org.apache.hadoop.metrics2.util.MBeans;
 
 import com.google.common.base.Preconditions;
-import org.apache.hadoop.hdds.utils.db.cache.TableCacheImpl;
 import org.apache.ratis.thirdparty.com.google.common.annotations.VisibleForTesting;
 import org.rocksdb.ColumnFamilyDescriptor;
 import org.rocksdb.ColumnFamilyHandle;
 import org.rocksdb.DBOptions;
 import org.rocksdb.FlushOptions;
+import org.rocksdb.Options;
 import org.rocksdb.RocksDB;
 import org.rocksdb.RocksDBException;
 import org.rocksdb.TransactionLogIterator;
 import org.rocksdb.WriteOptions;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import static org.apache.hadoop.hdds.utils.HddsServerUtil.toIOException;
 
 /**
  * RocksDB Store that supports creating Tables in DB.
@@ -69,12 +73,13 @@ public class RDBStore implements DBStore {
   @VisibleForTesting
   public RDBStore(File dbFile, DBOptions options,
                   Set<TableConfig> families) throws IOException {
-    this(dbFile, options, new WriteOptions(), families, new CodecRegistry());
+    this(dbFile, options, new WriteOptions(), families, new CodecRegistry(),
+        false);
   }
 
   public RDBStore(File dbFile, DBOptions options,
       WriteOptions writeOptions, Set<TableConfig> families,
-                  CodecRegistry registry)
+                  CodecRegistry registry, boolean readOnly)
       throws IOException {
     Preconditions.checkNotNull(dbFile, "DB file location cannot be null");
     Preconditions.checkNotNull(families);
@@ -94,8 +99,25 @@ public class RDBStore implements DBStore {
     this.writeOptions = writeOptions;
 
     try {
-      db = RocksDB.open(dbOptions, dbLocation.getAbsolutePath(),
-          columnFamilyDescriptors, columnFamilyHandles);
+      // This logic has been added to support old column families that have
+      // been removed, or those that may have been created in a future version.
+      // TODO : Revisit this logic during upgrade implementation.
+      List<TableConfig> columnFamiliesInDb = getColumnFamiliesInExistingDb();
+      List<TableConfig> extraCf = columnFamiliesInDb.stream().filter(
+          cf -> !families.contains(cf)).collect(Collectors.toList());
+      if (!extraCf.isEmpty()) {
+        LOG.info("Found the following extra column families in existing DB : " +
+                "{}", extraCf);
+        extraCf.forEach(cf -> columnFamilyDescriptors.add(cf.getDescriptor()));
+      }
+
+      if (readOnly) {
+        db = RocksDB.openReadOnly(dbOptions, dbLocation.getAbsolutePath(),
+            columnFamilyDescriptors, columnFamilyHandles);
+      } else {
+        db = RocksDB.open(dbOptions, dbLocation.getAbsolutePath(),
+            columnFamilyDescriptors, columnFamilyHandles);
+      }
 
       for (int x = 0; x < columnFamilyHandles.size(); x++) {
         handleTable.put(
@@ -128,7 +150,7 @@ public class RDBStore implements DBStore {
       }
 
       //Initialize checkpoint manager
-      checkPointManager = new RDBCheckpointManager(db, "rdb");
+      checkPointManager = new RDBCheckpointManager(db, dbLocation.getName());
       rdbMetrics = RDBMetrics.create();
 
     } catch (RocksDBException e) {
@@ -149,14 +171,24 @@ public class RDBStore implements DBStore {
     }
   }
 
-  public static IOException toIOException(String msg, RocksDBException e) {
-    String statusCode = e.getStatus() == null ? "N/A" :
-        e.getStatus().getCodeString();
-    String errMessage = e.getMessage() == null ? "Unknown error" :
-        e.getMessage();
-    String output = msg + "; status : " + statusCode
-        + "; message : " + errMessage;
-    return new IOException(output, e);
+  /**
+   * Read DB and return existing column families.
+   * @return List of column families
+   * @throws RocksDBException on Error.
+   */
+  private List<TableConfig> getColumnFamiliesInExistingDb()
+      throws RocksDBException {
+    List<byte[]> bytes = RocksDB.listColumnFamilies(new Options(),
+        dbLocation.getAbsolutePath());
+    List<TableConfig> columnFamiliesInDb = bytes.stream()
+        .map(cfbytes -> new TableConfig(StringUtils.bytes2String(cfbytes),
+            DBStoreBuilder.HDDS_DEFAULT_DB_PROFILE.getColumnFamilyOptions()))
+        .collect(Collectors.toList());
+    if (LOG.isDebugEnabled()) {
+      LOG.debug("Found column Families in DB : {}",
+          columnFamiliesInDb);
+    }
+    return columnFamiliesInDb;
   }
 
   @Override
@@ -270,9 +302,9 @@ public class RDBStore implements DBStore {
   @Override
   public <K, V> Table<K, V> getTable(String name,
       Class<K> keyType, Class<V> valueType,
-      TableCacheImpl.CacheCleanupPolicy cleanupPolicy) throws IOException {
+      TableCache.CacheType cacheType) throws IOException {
     return new TypedTable<>(getTable(name), codecRegistry, keyType,
-        valueType, cleanupPolicy);
+        valueType, cacheType);
   }
 
   @Override
@@ -285,7 +317,7 @@ public class RDBStore implements DBStore {
   }
 
   @Override
-  public void flush() throws IOException {
+  public void flushDB() throws IOException {
     try (FlushOptions flushOptions = new FlushOptions()) {
       flushOptions.setWaitForFlush(true);
       db.flush(flushOptions);
@@ -295,9 +327,22 @@ public class RDBStore implements DBStore {
   }
 
   @Override
+  public void flushLog(boolean sync) throws IOException {
+    if (db != null) {
+      try {
+        // for RocksDB it is sufficient to flush the WAL as entire db can
+        // be reconstructed using it.
+        db.flushWal(sync);
+      } catch (RocksDBException e) {
+        throw toIOException("Failed to flush db", e);
+      }
+    }
+  }
+
+  @Override
   public DBCheckpoint getCheckpoint(boolean flush) throws IOException {
     if (flush) {
-      this.flush();
+      this.flushDB();
     }
     return checkPointManager.createCheckpoint(checkpointsParentDir);
   }

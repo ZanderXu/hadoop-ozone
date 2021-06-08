@@ -19,7 +19,11 @@
 package org.apache.hadoop.ozone.om.ratis;
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Queue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -33,6 +37,8 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import org.apache.hadoop.hdds.function.SupplierWithIOException;
 import org.apache.hadoop.hdds.tracing.TracingUtil;
+import org.apache.hadoop.hdds.utils.TransactionInfo;
+import org.apache.hadoop.ozone.om.response.CleanupTableInfo;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.OMResponse;
 import org.apache.hadoop.util.Time;
 import org.slf4j.Logger;
@@ -210,7 +216,7 @@ public final class OzoneManagerDoubleBuffer {
   }
 
   /**
-   * Add to writeBatch {@link OMTransactionInfo}.
+   * Add to writeBatch {@link TransactionInfo}.
    */
   private Void addToBatchTransactionInfoWithTrace(String parentName,
       long transactionIndex, SupplierWithIOException<Void> supplier)
@@ -230,6 +236,8 @@ public final class OzoneManagerDoubleBuffer {
     while (isRunning.get()) {
       try {
         if (canFlush()) {
+          Map<String, List<Long>> cleanupEpochs = new HashMap<>();
+
           setReadyBuffer();
           List<Long> flushedEpochs = null;
           try(BatchOperation batchOperation = omMetadataManager.getStore()
@@ -246,6 +254,9 @@ public final class OzoneManagerDoubleBuffer {
                           batchOperation);
                       return null;
                     });
+
+                addCleanupEntry(entry, cleanupEpochs);
+
               } catch (IOException ex) {
                 // During Adding to RocksDB batch entry got an exception.
                 // We should terminate the OM.
@@ -253,28 +264,27 @@ public final class OzoneManagerDoubleBuffer {
               }
             });
 
-            // Only when ratis is enabled commit transaction info to DB.
-            if (isRatisEnabled) {
-              flushedEpochs =
-                  readyBuffer.stream().map(DoubleBufferEntry::getTrxLogIndex)
-                      .sorted().collect(Collectors.toList());
-              long lastRatisTransactionIndex =
-                  flushedEpochs.get(flushedEpochs.size() - 1);
-              long term = indexToTerm.apply(lastRatisTransactionIndex);
+            // Commit transaction info to DB.
+            flushedEpochs = readyBuffer.stream().map(
+                DoubleBufferEntry::getTrxLogIndex)
+                .sorted().collect(Collectors.toList());
+            long lastRatisTransactionIndex = flushedEpochs.get(
+                flushedEpochs.size() - 1);
+            long term = isRatisEnabled ?
+                indexToTerm.apply(lastRatisTransactionIndex) : -1;
 
-              addToBatchTransactionInfoWithTrace(lastTraceId.get(),
-                  lastRatisTransactionIndex,
-                  (SupplierWithIOException<Void>) () -> {
+            addToBatchTransactionInfoWithTrace(lastTraceId.get(),
+                lastRatisTransactionIndex,
+                (SupplierWithIOException<Void>) () -> {
                   omMetadataManager.getTransactionInfoTable().putWithBatch(
                       batchOperation, TRANSACTION_INFO_KEY,
-                      new OMTransactionInfo.Builder()
-                      .setTransactionIndex(lastRatisTransactionIndex)
-                      .setCurrentTerm(term).build());
+                      new TransactionInfo.Builder()
+                          .setTransactionIndex(lastRatisTransactionIndex)
+                          .setCurrentTerm(term).build());
                   return null;
                 });
-            }
 
-            long startTime = Time.monotonicNowNanos();
+            long startTime = Time.monotonicNow();
             flushBatchWithTrace(lastTraceId.get(), readyBuffer.size(),
                 (SupplierWithIOException<Void>) () -> {
                   omMetadataManager.getStore().commitBatchOperation(
@@ -282,7 +292,7 @@ public final class OzoneManagerDoubleBuffer {
                   return null;
                 });
             ozoneManagerDoubleBufferMetrics.updateFlushTime(
-                Time.monotonicNowNanos() - startTime);
+                Time.monotonicNow() - startTime);
           }
 
           // Complete futures first and then do other things. So, that
@@ -317,9 +327,10 @@ public final class OzoneManagerDoubleBuffer {
           }
 
 
-          cleanupCache(flushedEpochs);
-
           // Clean up committed transactions.
+
+          cleanupCache(cleanupEpochs);
+
           readyBuffer.clear();
 
           // update the last updated index in OzoneManagerStateMachine.
@@ -353,29 +364,34 @@ public final class OzoneManagerDoubleBuffer {
     }
   }
 
-  private void cleanupCache(List<Long> lastRatisTransactionIndex) {
-    // As now only volume and bucket transactions are handled only called
-    // cleanupCache on bucketTable.
-    // TODO: After supporting all write operations we need to call
-    //  cleanupCache on the tables only when buffer has entries for that table.
-    omMetadataManager.getBucketTable().cleanupCache(lastRatisTransactionIndex);
-    omMetadataManager.getVolumeTable().cleanupCache(lastRatisTransactionIndex);
-    omMetadataManager.getUserTable().cleanupCache(lastRatisTransactionIndex);
 
-    //TODO: Optimization we can do here is for key transactions we can only
-    // cleanup cache when it is key commit transaction. In this way all
-    // intermediate transactions for a key will be read from in-memory cache.
-    omMetadataManager.getOpenKeyTable().cleanupCache(lastRatisTransactionIndex);
-    omMetadataManager.getKeyTable().cleanupCache(lastRatisTransactionIndex);
-    omMetadataManager.getDeletedTable().cleanupCache(lastRatisTransactionIndex);
-    omMetadataManager.getMultipartInfoTable().cleanupCache(
-        lastRatisTransactionIndex);
-    omMetadataManager.getS3SecretTable().cleanupCache(
-        lastRatisTransactionIndex);
-    omMetadataManager.getDelegationTokenTable().cleanupCache(
-        lastRatisTransactionIndex);
-    omMetadataManager.getPrefixTable().cleanupCache(lastRatisTransactionIndex);
+  private void addCleanupEntry(DoubleBufferEntry entry, Map<String,
+      List<Long>> cleanupEpochs) {
+    Class<? extends OMClientResponse> responseClass =
+        entry.getResponse().getClass();
+    CleanupTableInfo cleanupTableInfo =
+        responseClass.getAnnotation(CleanupTableInfo.class);
+    if (cleanupTableInfo != null) {
+      String[] cleanupTables = cleanupTableInfo.cleanupTables();
+      for (String table : cleanupTables) {
+        cleanupEpochs.computeIfAbsent(table, list -> new ArrayList<>())
+            .add(entry.getTrxLogIndex());
+      }
+    } else {
+      // This is to catch early errors, when an new response class missed to
+      // add CleanupTableInfo annotation.
+      throw new RuntimeException("CleanupTableInfo Annotation is missing " +
+          "for" + responseClass);
+    }
+  }
 
+
+
+  private void cleanupCache(Map<String, List<Long>> cleanupEpochs) {
+    cleanupEpochs.forEach((tableName, epochs) -> {
+      Collections.sort(epochs);
+      omMetadataManager.getTable(tableName).cleanupCache(epochs);
+    });
   }
 
   /**

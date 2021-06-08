@@ -26,7 +26,7 @@ import org.apache.hadoop.hdds.security.x509.keys.HDDSKeyGenerator;
 import org.apache.hadoop.hdds.security.x509.keys.KeyCodec;
 import org.apache.hadoop.ozone.OzoneSecurityUtil;
 import org.apache.hadoop.security.ssl.KeyStoreTestUtil;
-import org.apache.hadoop.test.GenericTestUtils;
+import org.apache.ozone.test.GenericTestUtils;
 import org.bouncycastle.cert.X509CertificateHolder;
 import org.junit.After;
 import org.junit.Before;
@@ -69,8 +69,8 @@ public class TestCertificateClientInit {
   private KeyCodec dnKeyCodec;
   private KeyCodec omKeyCodec;
   private X509Certificate x509Certificate;
-  private final static String DN_COMPONENT = DNCertificateClient.COMPONENT_NAME;
-  private final static String OM_COMPONENT = OMCertificateClient.COMPONENT_NAME;
+  private static final String DN_COMPONENT = DNCertificateClient.COMPONENT_NAME;
+  private static final String OM_COMPONENT = OMCertificateClient.COMPONENT_NAME;
 
   @Parameter
   public boolean pvtKeyPresent;
@@ -201,7 +201,7 @@ public class TestCertificateClientInit {
     }
     InitResponse response = omCertificateClient.init();
 
-    if (pvtKeyPresent && pubKeyPresent & !certPresent) {
+    if (pvtKeyPresent && pubKeyPresent && !certPresent) {
       assertTrue(response.equals(RECOVER));
     } else {
       assertTrue(response.equals(expectedResult));

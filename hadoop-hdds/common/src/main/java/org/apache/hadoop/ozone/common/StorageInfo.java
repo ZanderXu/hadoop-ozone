@@ -20,6 +20,7 @@ package org.apache.hadoop.ozone.common;
 import com.google.common.base.Preconditions;
 import org.apache.hadoop.hdds.annotation.InterfaceAudience;
 import org.apache.hadoop.hdds.protocol.proto.HddsProtos.NodeType;
+import org.apache.hadoop.ozone.OzoneConsts;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -52,6 +53,10 @@ public class StorageInfo {
    * Property to hold creation time of the storage.
    */
   private static final String CREATION_TIME = "cTime";
+  /**
+   * Property to hold the layout version.
+   */
+  private static final String LAYOUT_VERSION = "layoutVersion";
 
   /**
    * Constructs StorageInfo instance.
@@ -64,13 +69,14 @@ public class StorageInfo {
 
    * @throws IOException - on Error.
    */
-  public StorageInfo(NodeType type, String cid, long cT)
+  public StorageInfo(NodeType type, String cid, long cT, int layout)
       throws IOException {
     Preconditions.checkNotNull(type);
     Preconditions.checkNotNull(cid);
     properties.setProperty(NODE_TYPE, type.name());
     properties.setProperty(CLUSTER_ID, cid);
     properties.setProperty(CREATION_TIME, String.valueOf(cT));
+    properties.setProperty(LAYOUT_VERSION, Integer.toString(layout));
   }
 
   public StorageInfo(NodeType type, File propertiesFile)
@@ -79,6 +85,7 @@ public class StorageInfo {
     verifyNodeType(type);
     verifyClusterId();
     verifyCreationTime();
+    verifyLayoutVersion();
   }
 
   public NodeType getNodeType() {
@@ -95,6 +102,22 @@ public class StorageInfo {
       return Long.parseLong(creationTime);
     }
     return null;
+  }
+
+  public int getLayoutVersion() {
+    String layout = properties.getProperty(LAYOUT_VERSION);
+    if(layout != null) {
+      return Integer.parseInt(layout);
+    }
+    return 0;
+  }
+
+  private void verifyLayoutVersion() {
+    String layout = getProperty(LAYOUT_VERSION);
+    if (layout == null) {
+      // For now, default it to "0"
+      setProperty(LAYOUT_VERSION, "0");
+    }
   }
 
   public String getProperty(String key) {
@@ -176,7 +199,7 @@ public class StorageInfo {
    * @return new clusterID
    */
   public static String newClusterID() {
-    return "CID-" + UUID.randomUUID().toString();
+    return OzoneConsts.CLUSTER_ID_PREFIX + UUID.randomUUID().toString();
   }
 
 }

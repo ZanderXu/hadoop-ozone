@@ -20,9 +20,12 @@ package org.apache.hadoop.ozone.om.request.bucket.acl;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.Map;
 
 import com.google.common.base.Optional;
 import org.apache.hadoop.ozone.OzoneAcl;
+import org.apache.hadoop.ozone.OzoneConsts;
+import org.apache.hadoop.ozone.audit.AuditLogger;
 import org.apache.hadoop.ozone.om.OMMetadataManager;
 import org.apache.hadoop.ozone.om.OMMetrics;
 import org.apache.hadoop.ozone.om.OzoneManager;
@@ -30,7 +33,6 @@ import org.apache.hadoop.ozone.om.exceptions.OMException;
 import org.apache.hadoop.ozone.om.helpers.OmBucketInfo;
 import org.apache.hadoop.ozone.om.ratis.utils.OzoneManagerDoubleBufferHelper;
 import org.apache.hadoop.ozone.om.request.OMClientRequest;
-import org.apache.hadoop.ozone.om.response.bucket.acl.OMBucketAclResponse;
 import org.apache.hadoop.ozone.util.BooleanBiFunction;
 import org.apache.hadoop.ozone.om.request.util.ObjectParser;
 import org.apache.hadoop.ozone.om.response.OMClientResponse;
@@ -106,21 +108,26 @@ public abstract class OMBucketAclRequest extends OMClientRequest {
         throw new OMException(OMException.ResultCodes.BUCKET_NOT_FOUND);
       }
 
-      // Check if this transaction is a replay of ratis logs.
-      // If this is a replay, then the response has already been returned to
-      // the client. So take no further action and return a dummy
-      // OMClientResponse.
-      if (isReplay(ozoneManager, omBucketInfo, transactionLogIndex)) {
-        LOG.debug("Replayed Transaction {} ignored. Request: {}",
-            transactionLogIndex, getOmRequest());
-        return new OMBucketAclResponse(createReplayOMResponse(omResponse));
-      }
-
       operationResult = omBucketAclOp.apply(ozoneAcls, omBucketInfo);
       omBucketInfo.setUpdateID(transactionLogIndex,
           ozoneManager.isRatisEnabled());
 
       if (operationResult) {
+        // Update the modification time when updating ACLs of Bucket.
+        long modificationTime = omBucketInfo.getModificationTime();
+        if (getOmRequest().getAddAclRequest().hasObj()) {
+          modificationTime = getOmRequest().getAddAclRequest()
+              .getModificationTime();
+        } else if (getOmRequest().getSetAclRequest().hasObj()) {
+          modificationTime = getOmRequest().getSetAclRequest()
+              .getModificationTime();
+        } else if (getOmRequest().getRemoveAclRequest().hasObj()) {
+          modificationTime = getOmRequest().getRemoveAclRequest()
+              .getModificationTime();
+        }
+        omBucketInfo = omBucketInfo.toBuilder()
+            .setModificationTime(modificationTime).build();
+
         // update cache.
         omMetadataManager.getBucketTable().addCacheEntry(
             new CacheKey<>(dbBucketKey),
@@ -141,9 +148,14 @@ public abstract class OMBucketAclRequest extends OMClientRequest {
       }
     }
 
+    OzoneObj obj = getObject();
+    Map<String, String> auditMap = obj.toAuditMap();
+    if (ozoneAcls != null) {
+      auditMap.put(OzoneConsts.ACL, ozoneAcls.toString());
+    }
 
-    onComplete(operationResult, exception, ozoneManager.getMetrics());
-
+    onComplete(operationResult, exception, ozoneManager.getMetrics(),
+        ozoneManager.getAuditLogger(), auditMap);
     return omClientResponse;
   }
 
@@ -159,6 +171,13 @@ public abstract class OMBucketAclRequest extends OMClientRequest {
    * @return path name
    */
   abstract String getPath();
+
+
+  /**
+   * Get the Bucket object Info from the request.
+   * @return OzoneObjInfo
+   */
+  abstract OzoneObj getObject();
 
   // TODO: Finer grain metrics can be moved to these callbacks. They can also
   // be abstracted into separate interfaces in future.
@@ -194,10 +213,11 @@ public abstract class OMBucketAclRequest extends OMClientRequest {
    * @param operationResult
    * @param exception
    * @param omMetrics
+   * @param auditLogger
+   * @param auditMap
    */
   abstract void onComplete(boolean operationResult, IOException exception,
-      OMMetrics omMetrics);
-
-
+      OMMetrics omMetrics, AuditLogger auditLogger,
+      Map<String, String> auditMap);
 }
 

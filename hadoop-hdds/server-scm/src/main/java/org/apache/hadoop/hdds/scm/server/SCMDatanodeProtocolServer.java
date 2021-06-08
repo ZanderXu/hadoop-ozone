@@ -44,10 +44,10 @@ import org.apache.hadoop.hdds.protocol.proto.StorageContainerDatanodeProtocolPro
 import org.apache.hadoop.hdds.protocol.proto.StorageContainerDatanodeProtocolProtos.SCMVersionRequestProto;
 import org.apache.hadoop.hdds.protocol.proto.StorageContainerDatanodeProtocolProtos.SCMVersionResponseProto;
 import org.apache.hadoop.hdds.scm.events.SCMEvents;
+import org.apache.hadoop.hdds.scm.ha.SCMNodeDetails;
 import org.apache.hadoop.hdds.scm.server.SCMDatanodeHeartbeatDispatcher.PipelineReportFromDatanode;
 import org.apache.hadoop.hdds.scm.server.SCMDatanodeHeartbeatDispatcher.ReportFromDatanode;
 import org.apache.hadoop.hdds.server.events.EventPublisher;
-import org.apache.hadoop.hdds.utils.HddsServerUtil;
 import org.apache.hadoop.hdds.utils.ProtocolMessageMetrics;
 import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.ipc.ProtobufRpcEngine;
@@ -69,6 +69,7 @@ import org.apache.hadoop.ozone.protocol.commands.DeleteContainerCommand;
 import org.apache.hadoop.ozone.protocol.commands.RegisteredCommand;
 import org.apache.hadoop.ozone.protocol.commands.ReplicateContainerCommand;
 import org.apache.hadoop.ozone.protocol.commands.SCMCommand;
+import org.apache.hadoop.ozone.protocol.commands.SetNodeOperationalStateCommand;
 import org.apache.hadoop.ozone.protocolPB.StorageContainerDatanodeProtocolPB;
 import org.apache.hadoop.ozone.protocolPB.StorageContainerDatanodeProtocolServerSideTranslatorPB;
 import org.apache.hadoop.security.authorize.PolicyProvider;
@@ -85,7 +86,7 @@ import static org.apache.hadoop.hdds.protocol.proto.StorageContainerDatanodeProt
 import static org.apache.hadoop.hdds.protocol.proto.StorageContainerDatanodeProtocolProtos.SCMCommandProto.Type.deleteContainerCommand;
 import static org.apache.hadoop.hdds.protocol.proto.StorageContainerDatanodeProtocolProtos.SCMCommandProto.Type.replicateContainerCommand;
 import static org.apache.hadoop.hdds.protocol.proto.StorageContainerDatanodeProtocolProtos.SCMCommandProto.Type.reregisterCommand;
-import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_DATANODE_ADDRESS_KEY;
+import static org.apache.hadoop.hdds.protocol.proto.StorageContainerDatanodeProtocolProtos.SCMCommandProto.Type.setNodeOperationalStateCommand;
 import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_HANDLER_COUNT_DEFAULT;
 import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_HANDLER_COUNT_KEY;
 import static org.apache.hadoop.hdds.scm.events.SCMEvents.CONTAINER_REPORT;
@@ -135,7 +136,8 @@ public class SCMDatanodeProtocolServer implements
     heartbeatDispatcher = new SCMDatanodeHeartbeatDispatcher(
         scm.getScmNodeManager(), eventPublisher);
 
-    InetSocketAddress datanodeRpcAddr = getDataNodeBindAddress(conf);
+    InetSocketAddress datanodeRpcAddr = getDataNodeBindAddress(
+        conf, scm.getScmNodeDetails());
 
     protocolMessageMetrics = getProtocolMessageMetrics();
 
@@ -203,13 +205,13 @@ public class SCMDatanodeProtocolServer implements
 
   @Override
   public SCMRegisteredResponseProto register(
-      HddsProtos.DatanodeDetailsProto datanodeDetailsProto,
+      HddsProtos.ExtendedDatanodeDetailsProto extendedDatanodeDetailsProto,
       NodeReportProto nodeReport,
       ContainerReportsProto containerReportsProto,
           PipelineReportsProto pipelineReportsProto)
       throws IOException {
     DatanodeDetails datanodeDetails = DatanodeDetails
-        .getFromProtoBuf(datanodeDetailsProto);
+        .getFromProtoBuf(extendedDatanodeDetailsProto);
     boolean auditSuccess = true;
     Map<String, String> auditMap = Maps.newHashMap();
     auditMap.put("datanodeDetails", datanodeDetails.toString());
@@ -290,8 +292,13 @@ public class SCMDatanodeProtocolServer implements
   @VisibleForTesting
   public SCMCommandProto getCommandResponse(SCMCommand cmd)
       throws IOException {
-    SCMCommandProto.Builder builder =
-        SCMCommandProto.newBuilder();
+    SCMCommandProto.Builder builder = SCMCommandProto.newBuilder()
+        .setEncodedToken(cmd.getEncodedToken());
+
+    // In HA mode, it is the term of current leader SCM.
+    // In non-HA mode, it is the default value 0.
+    builder.setTerm(cmd.getTerm());
+
     switch (cmd.getType()) {
     case reregisterCommand:
       return builder
@@ -343,6 +350,12 @@ public class SCMDatanodeProtocolServer implements
           .setCommandType(closePipelineCommand)
           .setClosePipelineCommandProto(
               ((ClosePipelineCommand)cmd).getProto())
+          .build();
+    case setNodeOperationalStateCommand:
+      return builder
+          .setCommandType(setNodeOperationalStateCommand)
+          .setSetNodeOperationalStateCommandProto(
+              ((SetNodeOperationalStateCommand)cmd).getProto())
           .build();
     default:
       throw new IllegalArgumentException("Scm command " +
@@ -417,7 +430,7 @@ public class SCMDatanodeProtocolServer implements
    * @return
    */
   protected String getDatanodeAddressKey() {
-    return OZONE_SCM_DATANODE_ADDRESS_KEY;
+    return this.scm.getScmNodeDetails().getDatanodeAddressKey();
   }
 
   /**
@@ -425,8 +438,9 @@ public class SCMDatanodeProtocolServer implements
    * @param conf ozone configuration
    * @return InetSocketAddress
    */
-  protected InetSocketAddress getDataNodeBindAddress(OzoneConfiguration conf) {
-    return HddsServerUtil.getScmDataNodeBindAddress(conf);
+  protected InetSocketAddress getDataNodeBindAddress(
+      OzoneConfiguration conf, SCMNodeDetails scmNodeDetails) {
+    return scmNodeDetails.getDatanodeProtocolServerAddress();
   }
 
   /**

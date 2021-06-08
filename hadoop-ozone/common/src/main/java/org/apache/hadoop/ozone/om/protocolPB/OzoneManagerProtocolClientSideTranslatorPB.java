@@ -21,9 +21,11 @@ import java.io.IOException;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 import org.apache.hadoop.hdds.annotation.InterfaceAudience;
+import org.apache.hadoop.hdds.client.ReplicationConfig;
 import org.apache.hadoop.hdds.scm.container.common.helpers.ExcludeList;
 import org.apache.hadoop.hdds.tracing.TracingUtil;
 import org.apache.hadoop.io.Text;
@@ -33,6 +35,7 @@ import org.apache.hadoop.ozone.om.helpers.DBUpdates;
 import org.apache.hadoop.ozone.om.helpers.KeyValueUtil;
 import org.apache.hadoop.ozone.om.helpers.OmBucketArgs;
 import org.apache.hadoop.ozone.om.helpers.OmBucketInfo;
+import org.apache.hadoop.ozone.om.helpers.OmDeleteKeys;
 import org.apache.hadoop.ozone.om.helpers.OmKeyArgs;
 import org.apache.hadoop.ozone.om.helpers.OmKeyInfo;
 import org.apache.hadoop.ozone.om.helpers.OmKeyLocationInfo;
@@ -43,6 +46,7 @@ import org.apache.hadoop.ozone.om.helpers.OmMultipartUploadCompleteInfo;
 import org.apache.hadoop.ozone.om.helpers.OmMultipartUploadCompleteList;
 import org.apache.hadoop.ozone.om.helpers.OmMultipartUploadList;
 import org.apache.hadoop.ozone.om.helpers.OmMultipartUploadListParts;
+import org.apache.hadoop.ozone.om.helpers.OmRenameKeys;
 import org.apache.hadoop.ozone.om.helpers.OmVolumeArgs;
 import org.apache.hadoop.ozone.om.helpers.OpenKeySession;
 import org.apache.hadoop.ozone.om.helpers.OzoneFileStatus;
@@ -71,7 +75,9 @@ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.CreateV
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.DBUpdatesRequest;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.DBUpdatesResponse;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.DeleteBucketRequest;
+import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.DeleteKeyArgs;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.DeleteKeyRequest;
+import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.DeleteKeysRequest;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.DeleteVolumeRequest;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.GetAclRequest;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.GetAclResponse;
@@ -118,8 +124,12 @@ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.Recover
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.RecoverTrashResponse;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.RemoveAclRequest;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.RemoveAclResponse;
+import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.RenameKeysArgs;
+import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.RenameKeysMap;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.RenameKeyRequest;
+import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.RenameKeysRequest;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.RenewDelegationTokenResponseProto;
+import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.RevokeS3SecretRequest;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.ServiceListRequest;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.ServiceListResponse;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.SetAclRequest;
@@ -131,15 +141,17 @@ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.VolumeI
 import org.apache.hadoop.ozone.protocolPB.OMPBHelper;
 import org.apache.hadoop.ozone.security.OzoneTokenIdentifier;
 import org.apache.hadoop.ozone.security.acl.OzoneObj;
-import org.apache.hadoop.security.proto.SecurityProtos.CancelDelegationTokenRequestProto;
-import org.apache.hadoop.security.proto.SecurityProtos.GetDelegationTokenRequestProto;
-import org.apache.hadoop.security.proto.SecurityProtos.RenewDelegationTokenRequestProto;
+import org.apache.hadoop.ozone.security.proto.SecurityProtos.CancelDelegationTokenRequestProto;
+import org.apache.hadoop.ozone.security.proto.SecurityProtos.GetDelegationTokenRequestProto;
+import org.apache.hadoop.ozone.security.proto.SecurityProtos.RenewDelegationTokenRequestProto;
 import org.apache.hadoop.security.token.Token;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
 import com.google.protobuf.ByteString;
+
+import static org.apache.hadoop.ozone.ClientVersions.CURRENT_VERSION;
 import static org.apache.hadoop.ozone.om.exceptions.OMException.ResultCodes;
 import static org.apache.hadoop.ozone.om.exceptions.OMException.ResultCodes.TOKEN_ERROR_OTHER;
 import static org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.Status.ACCESS_DENIED;
@@ -191,6 +203,7 @@ public final class OzoneManagerProtocolClientSideTranslatorPB
 
     return OMRequest.newBuilder()
         .setCmdType(cmdType)
+        .setVersion(CURRENT_VERSION)
         .setClientId(clientID);
   }
 
@@ -254,14 +267,18 @@ public final class OzoneManagerProtocolClientSideTranslatorPB
    * Changes the Quota on a volume.
    *
    * @param volume - Name of the volume.
-   * @param quota - Quota in bytes.
+   * @param quotaInNamespace - Volume quota in counts.
+   * @param quotaInBytes - Volume quota in bytes.
    * @throws IOException
    */
   @Override
-  public void setQuota(String volume, long quota) throws IOException {
+  public void setQuota(String volume, long quotaInNamespace,
+      long quotaInBytes) throws IOException {
     SetVolumePropertyRequest.Builder req =
         SetVolumePropertyRequest.newBuilder();
-    req.setVolumeName(volume).setQuotaInBytes(quota);
+    req.setVolumeName(volume)
+        .setQuotaInBytes(quotaInBytes)
+        .setQuotaInNamespace(quotaInNamespace);
 
     OMRequest omRequest = createOMRequest(Type.SetVolumeProperty)
         .setSetVolumePropertyRequest(req)
@@ -542,13 +559,12 @@ public final class OzoneManagerProtocolClientSideTranslatorPB
           OzoneAcl.toProtobuf(a)).collect(Collectors.toList()));
     }
 
-    if (args.getFactor() != null) {
-      keyArgs.setFactor(args.getFactor());
+    if (args.getReplicationConfig() != null) {
+      keyArgs.setFactor(
+          ReplicationConfig.getLegacyFactor(args.getReplicationConfig()));
+      keyArgs.setType(args.getReplicationConfig().getReplicationType());
     }
 
-    if (args.getType() != null) {
-      keyArgs.setType(args.getType());
-    }
 
     if (args.getDataSize() > 0) {
       keyArgs.setDataSize(args.getDataSize());
@@ -601,12 +617,10 @@ public final class OzoneManagerProtocolClientSideTranslatorPB
         .setKeyName(args.getKeyName())
         .setDataSize(args.getDataSize());
 
-    if (args.getFactor() != null) {
-      keyArgs.setFactor(args.getFactor());
-    }
-
-    if (args.getType() != null) {
-      keyArgs.setType(args.getType());
+    if (args.getReplicationConfig() != null) {
+      keyArgs.setFactor(
+          ReplicationConfig.getLegacyFactor(args.getReplicationConfig()));
+      keyArgs.setType(args.getReplicationConfig().getReplicationType());
     }
 
     req.setKeyArgs(keyArgs);
@@ -628,16 +642,25 @@ public final class OzoneManagerProtocolClientSideTranslatorPB
     CommitKeyRequest.Builder req = CommitKeyRequest.newBuilder();
     List<OmKeyLocationInfo> locationInfoList = args.getLocationInfoList();
     Preconditions.checkNotNull(locationInfoList);
-    KeyArgs keyArgs = KeyArgs.newBuilder()
+    KeyArgs.Builder keyArgsBuilder = KeyArgs.newBuilder()
         .setVolumeName(args.getVolumeName())
         .setBucketName(args.getBucketName())
         .setKeyName(args.getKeyName())
         .setDataSize(args.getDataSize())
-        .addAllKeyLocations(
-            locationInfoList.stream().map(OmKeyLocationInfo::getProtobuf)
-                .collect(Collectors.toList())).build();
-    req.setKeyArgs(keyArgs);
+        .addAllKeyLocations(locationInfoList.stream()
+            // TODO use OM version?
+            .map(info -> info.getProtobuf(CURRENT_VERSION))
+            .collect(Collectors.toList()));
+
+    if (args.getReplicationConfig() != null) {
+      keyArgsBuilder.setFactor(
+          ReplicationConfig.getLegacyFactor(args.getReplicationConfig()));
+      keyArgsBuilder.setType(args.getReplicationConfig().getReplicationType());
+    }
+
+    req.setKeyArgs(keyArgsBuilder.build());
     req.setClientID(clientId);
+
 
     OMRequest omRequest = createOMRequest(Type.CommitKey)
         .setCommitKeyRequest(req)
@@ -669,6 +692,33 @@ public final class OzoneManagerProtocolClientSideTranslatorPB
         handleError(submitRequest(omRequest)).getLookupKeyResponse();
 
     return OmKeyInfo.getFromProtobuf(resp.getKeyInfo());
+  }
+
+  @Override
+  public void renameKeys(OmRenameKeys omRenameKeys) throws IOException {
+
+    List<RenameKeysMap> renameKeyList  = new ArrayList<>();
+    for (Map.Entry< String, String> entry :
+        omRenameKeys.getFromAndToKey().entrySet()) {
+      RenameKeysMap.Builder renameKey = RenameKeysMap.newBuilder()
+          .setFromKeyName(entry.getKey())
+          .setToKeyName(entry.getValue());
+      renameKeyList.add(renameKey.build());
+    }
+
+    RenameKeysArgs.Builder renameKeyArgs = RenameKeysArgs.newBuilder()
+        .setVolumeName(omRenameKeys.getVolume())
+        .setBucketName(omRenameKeys.getBucket())
+        .addAllRenameKeysMap(renameKeyList);
+
+    RenameKeysRequest.Builder reqKeys = RenameKeysRequest.newBuilder()
+        .setRenameKeysArgs(renameKeyArgs.build());
+
+    OMRequest omRequest = createOMRequest(Type.RenameKeys)
+        .setRenameKeysRequest(reqKeys.build())
+        .build();
+
+    handleError(submitRequest(omRequest));
   }
 
   @Override
@@ -713,11 +763,35 @@ public final class OzoneManagerProtocolClientSideTranslatorPB
   }
 
   /**
+   * Deletes existing key/keys. This interface supports delete
+   * multiple keys and a single key.
+   *
+   * @param deleteKeys
+   * @throws IOException
+   */
+  @Override
+  public void deleteKeys(OmDeleteKeys deleteKeys) throws IOException {
+    DeleteKeysRequest.Builder req = DeleteKeysRequest.newBuilder();
+    DeleteKeyArgs deletedKeys = DeleteKeyArgs.newBuilder()
+        .setBucketName(deleteKeys.getBucket())
+        .setVolumeName(deleteKeys.getVolume())
+        .addAllKeys(deleteKeys.getKeyNames()).build();
+    req.setDeleteKeys(deletedKeys);
+    OMRequest omRequest = createOMRequest(Type.DeleteKeys)
+        .setDeleteKeysRequest(req)
+        .build();
+
+    handleError(submitRequest(omRequest));
+
+  }
+
+  /**
    * Deletes an existing empty bucket from volume.
    * @param volume - Name of the volume.
    * @param bucket - Name of the bucket.
    * @throws IOException
    */
+  @Override
   public void deleteBucket(String volume, String bucket) throws IOException {
     DeleteBucketRequest.Builder req = DeleteBucketRequest.newBuilder();
     req.setVolumeName(volume);
@@ -779,7 +853,17 @@ public final class OzoneManagerProtocolClientSideTranslatorPB
         .getGetS3SecretResponse();
 
     return S3SecretValue.fromProtobuf(resp.getS3Secret());
+  }
 
+  @Override
+  public void revokeS3Secret(String kerberosID) throws IOException {
+    RevokeS3SecretRequest request = RevokeS3SecretRequest.newBuilder()
+            .setKerberosID(kerberosID)
+            .build();
+    OMRequest omRequest = createOMRequest(Type.RevokeS3Secret)
+            .setRevokeS3SecretRequest(request)
+            .build();
+    handleError(submitRequest(omRequest));
   }
 
   /**
@@ -798,10 +882,16 @@ public final class OzoneManagerProtocolClientSideTranslatorPB
         .setVolumeName(omKeyArgs.getVolumeName())
         .setBucketName(omKeyArgs.getBucketName())
         .setKeyName(omKeyArgs.getKeyName())
-        .setFactor(omKeyArgs.getFactor())
         .addAllAcls(omKeyArgs.getAcls().stream().map(a ->
-            OzoneAcl.toProtobuf(a)).collect(Collectors.toList()))
-        .setType(omKeyArgs.getType());
+            OzoneAcl.toProtobuf(a)).collect(Collectors.toList()));
+
+    if (omKeyArgs.getReplicationConfig() != null) {
+      keyArgs.setFactor(
+              ReplicationConfig
+                      .getLegacyFactor(omKeyArgs.getReplicationConfig()));
+      keyArgs.setType(omKeyArgs.getReplicationConfig().getReplicationType());
+    }
+
     multipartInfoInitiateRequest.setKeyArgs(keyArgs.build());
 
     OMRequest omRequest = createOMRequest(
@@ -835,9 +925,10 @@ public final class OzoneManagerProtocolClientSideTranslatorPB
         .setIsMultipartKey(omKeyArgs.getIsMultipartKey())
         .setMultipartNumber(omKeyArgs.getMultipartUploadPartNumber())
         .setDataSize(omKeyArgs.getDataSize())
-        .addAllKeyLocations(
-            locationInfoList.stream().map(OmKeyLocationInfo::getProtobuf)
-                .collect(Collectors.toList()));
+        .addAllKeyLocations(locationInfoList.stream()
+            // TODO use OM version?
+            .map(info -> info.getProtobuf(CURRENT_VERSION))
+            .collect(Collectors.toList()));
     multipartCommitUploadPartRequest.setClientID(clientId);
     multipartCommitUploadPartRequest.setKeyArgs(keyArgs.build());
 
@@ -931,7 +1022,9 @@ public final class OzoneManagerProtocolClientSideTranslatorPB
 
 
     OmMultipartUploadListParts omMultipartUploadListParts =
-        new OmMultipartUploadListParts(response.getType(), response.getFactor(),
+        new OmMultipartUploadListParts(
+                ReplicationConfig.fromTypeAndFactor(response.getType(),
+                response.getFactor()),
             response.getNextPartNumberMarker(), response.getIsTruncated());
     omMultipartUploadListParts.addProtoPartList(response.getPartsListList());
 
@@ -966,8 +1059,8 @@ public final class OzoneManagerProtocolClientSideTranslatorPB
                 proto.getKeyName(),
                 proto.getUploadId(),
                 Instant.ofEpochMilli(proto.getCreationTime()),
-                proto.getType(),
-                proto.getFactor()
+                ReplicationConfig.fromTypeAndFactor(proto.getType(),
+                        proto.getFactor())
             ))
             .collect(Collectors.toList());
 
@@ -976,6 +1069,7 @@ public final class OzoneManagerProtocolClientSideTranslatorPB
     return response;
   }
 
+  @Override
   public List<ServiceInfo> getServiceList() throws IOException {
     ServiceListRequest req = ServiceListRequest.newBuilder().build();
 
@@ -1007,7 +1101,7 @@ public final class OzoneManagerProtocolClientSideTranslatorPB
         resp.getServiceInfoList().stream()
             .map(ServiceInfo::getFromProtobuf)
             .collect(Collectors.toList()),
-        resp.getCaCertificate());
+        resp.getCaCertificate(), resp.getCaCertsList());
   }
 
   /**
@@ -1113,11 +1207,13 @@ public final class OzoneManagerProtocolClientSideTranslatorPB
    * @return OzoneFileStatus for the key.
    * @throws IOException
    */
+  @Override
   public OzoneFileStatus getFileStatus(OmKeyArgs args) throws IOException {
     KeyArgs keyArgs = KeyArgs.newBuilder()
         .setVolumeName(args.getVolumeName())
         .setBucketName(args.getBucketName())
         .setKeyName(args.getKeyName())
+        .setSortDatanodes(args.getSortDatanodes())
         .build();
     GetFileStatusRequest req =
         GetFileStatusRequest.newBuilder()
@@ -1300,18 +1396,21 @@ public final class OzoneManagerProtocolClientSideTranslatorPB
   @Override
   public OpenKeySession createFile(OmKeyArgs args,
       boolean overWrite, boolean recursive) throws IOException {
-    KeyArgs keyArgs = KeyArgs.newBuilder()
+    KeyArgs.Builder keyArgsBuilder = KeyArgs.newBuilder()
         .setVolumeName(args.getVolumeName())
         .setBucketName(args.getBucketName())
         .setKeyName(args.getKeyName())
         .setDataSize(args.getDataSize())
-        .setType(args.getType())
-        .setFactor(args.getFactor())
         .addAllAcls(args.getAcls().stream().map(a ->
-            OzoneAcl.toProtobuf(a)).collect(Collectors.toList()))
-        .build();
+            OzoneAcl.toProtobuf(a)).collect(Collectors.toList()));
+    if (args.getReplicationConfig() != null) {
+      keyArgsBuilder.setFactor(
+              ReplicationConfig
+                      .getLegacyFactor(args.getReplicationConfig()));
+      keyArgsBuilder.setType(args.getReplicationConfig().getReplicationType());
+    }
     CreateFileRequest createFileRequest = CreateFileRequest.newBuilder()
-            .setKeyArgs(keyArgs)
+            .setKeyArgs(keyArgsBuilder.build())
             .setIsOverwrite(overWrite)
             .setIsRecursive(recursive)
             .build();
@@ -1331,6 +1430,7 @@ public final class OzoneManagerProtocolClientSideTranslatorPB
         .setVolumeName(args.getVolumeName())
         .setBucketName(args.getBucketName())
         .setKeyName(args.getKeyName())
+        .setSortDatanodes(args.getSortDatanodes())
         .build();
     ListStatusRequest listStatusRequest =
         ListStatusRequest.newBuilder()

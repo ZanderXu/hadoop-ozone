@@ -49,8 +49,7 @@ import org.apache.hadoop.ozone.container.common.interfaces.Handler;
 import org.apache.hadoop.ozone.container.common.transport.server
       .XceiverServerSpi;
 import org.apache.hadoop.ozone.container.ozoneimpl.ContainerController;
-import org.apache.hadoop.ozone.web.utils.OzoneUtils;
-import org.apache.hadoop.test.GenericTestUtils;
+import org.apache.ozone.test.GenericTestUtils;
 import org.apache.hadoop.hdds.conf.OzoneConfiguration;
 
 import static org.apache.ratis.rpc.SupportedRpcType.GRPC;
@@ -62,14 +61,12 @@ import org.apache.ratis.util.function.CheckedBiConsumer;
 import java.util.Map;
 import java.util.function.BiConsumer;
 
-import org.junit.Ignore;
 import org.junit.Test;
 import org.junit.Assert;
 
 /**
  * This class tests the metrics of ContainerStateMachine.
  */
-@Ignore
 public class TestCSMMetrics {
   static final String TEST_DIR =
       GenericTestUtils.getTestDir("dfs").getAbsolutePath()
@@ -99,7 +96,6 @@ public class TestCSMMetrics {
       throws Exception {
     final List<XceiverServerSpi> servers = new ArrayList<>();
     XceiverClientSpi client = null;
-    String containerName = OzoneUtils.getRequestID();
     try {
       final Pipeline pipeline = MockPipeline.createPipeline(numDatanodes);
       final OzoneConfiguration conf = new OzoneConfiguration();
@@ -227,7 +223,7 @@ public class TestCSMMetrics {
     }
 
     @Override
-    public void setScmId(String scmId) {
+    public void setClusterId(String scmId) {
 
     }
 

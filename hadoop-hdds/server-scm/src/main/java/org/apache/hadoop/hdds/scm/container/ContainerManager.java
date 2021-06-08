@@ -18,6 +18,7 @@ package org.apache.hadoop.hdds.scm.container;
 
 import java.io.Closeable;
 import java.io.IOException;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -92,6 +93,25 @@ public interface ContainerManager extends Closeable {
    * @throws IOException
    */
   List<ContainerInfo> listContainer(ContainerID startContainerID, int count);
+
+  /**
+   * Returns containers under certain conditions.
+   * Search container IDs from start ID(exclusive),
+   * The max size of the searching range cannot exceed the
+   * value of count.
+   *
+   * @param startContainerID start containerID, >=0,
+   * start searching at the head if 0.
+   * @param count count must be >= 0
+   *              Usually the count will be replace with a very big
+   *              value instead of being unlimited in case the db is very big.
+   * @param state Container of this state will be returned. Can be null.
+   *
+   * @return a list of container.
+   * @throws IOException
+   */
+  List<ContainerInfo> listContainer(ContainerID startContainerID, int count,
+      HddsProtos.LifeCycleState state);
 
   /**
    * Allocates a new container for a given keyName and replication factor.
@@ -180,7 +200,7 @@ public interface ContainerManager extends Closeable {
    * @return ContainerInfo for the matching container.
    */
   ContainerInfo getMatchingContainer(long size, String owner,
-      Pipeline pipeline, List<ContainerID> excludedContainerIDS);
+      Pipeline pipeline, Collection<ContainerID> excludedContainerIDS);
 
   /**
    * Once after report processor handler completes, call this to notify

@@ -19,7 +19,8 @@
 package org.apache.hadoop.ozone.genesis;
 
 import com.google.common.base.Preconditions;
-import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
+import org.apache.hadoop.hdds.client.ReplicationConfig;
+import org.apache.hadoop.hdds.client.StandaloneReplicationConfig;
 import org.apache.hadoop.hdds.protocol.proto.HddsProtos.ReplicationFactor;
 import org.apache.hadoop.hdds.protocol.proto.HddsProtos.ReplicationType;
 import org.apache.hadoop.hdds.protocol.DatanodeDetails;
@@ -57,6 +58,43 @@ public class BenchMarkContainerStateMap {
   private AtomicInteger runCount;
   private static int errorFrequency = 100;
 
+  public static Pipeline createPipeline(String containerName,
+      Iterable<DatanodeDetails> ids) throws IOException {
+    Objects.requireNonNull(ids, "ids == null");
+    Preconditions.checkArgument(ids.iterator().hasNext());
+    List<DatanodeDetails> dns = new ArrayList<>();
+    ids.forEach(dns::add);
+    final Pipeline pipeline = Pipeline.newBuilder()
+        .setState(Pipeline.PipelineState.OPEN)
+        .setId(PipelineID.randomId())
+        .setReplicationConfig(
+            new StandaloneReplicationConfig(ReplicationFactor.ONE))
+        .setNodes(dns)
+        .build();
+    return pipeline;
+  }
+
+  public static Pipeline createSingleNodePipeline(String containerName)
+      throws IOException {
+    return createPipeline(containerName, 1);
+  }
+
+  /**
+   * Create a pipeline with single node replica.
+   *
+   * @return Pipeline with single node in it.
+   * @throws IOException
+   */
+  public static Pipeline createPipeline(String containerName, int numNodes)
+      throws IOException {
+    Preconditions.checkArgument(numNodes >= 1);
+    final List<DatanodeDetails> ids = new ArrayList<>(numNodes);
+    for (int i = 0; i < numNodes; i++) {
+      ids.add(GenesisUtil.createDatanodeDetails(UUID.randomUUID()));
+    }
+    return createPipeline(containerName, ids);
+  }
+
   @Setup(Level.Trial)
   public void initialize() throws IOException {
     stateMap = new ContainerStateMap();
@@ -70,7 +108,8 @@ public class BenchMarkContainerStateMap {
             .setState(CLOSED)
             .setPipelineID(pipeline.getId())
             .setReplicationType(pipeline.getType())
-            .setReplicationFactor(pipeline.getFactor())
+            .setReplicationFactor(ReplicationConfig
+                .getLegacyFactor(pipeline.getReplicationConfig()))
             .setUsedBytes(0)
             .setNumberOfKeys(0)
             .setStateEnterTime(Time.now())
@@ -90,7 +129,8 @@ public class BenchMarkContainerStateMap {
             .setState(OPEN)
             .setPipelineID(pipeline.getId())
             .setReplicationType(pipeline.getType())
-            .setReplicationFactor(pipeline.getFactor())
+            .setReplicationFactor(ReplicationConfig
+                .getLegacyFactor(pipeline.getReplicationConfig()))
             .setUsedBytes(0)
             .setNumberOfKeys(0)
             .setStateEnterTime(Time.now())
@@ -109,7 +149,8 @@ public class BenchMarkContainerStateMap {
           .setState(OPEN)
           .setPipelineID(pipeline.getId())
           .setReplicationType(pipeline.getType())
-          .setReplicationFactor(pipeline.getFactor())
+          .setReplicationFactor(ReplicationConfig
+              .getLegacyFactor(pipeline.getReplicationConfig()))
           .setUsedBytes(0)
           .setNumberOfKeys(0)
           .setStateEnterTime(Time.now())
@@ -126,43 +167,6 @@ public class BenchMarkContainerStateMap {
 
   }
 
-  public static Pipeline createSingleNodePipeline(String containerName)
-      throws IOException {
-    return createPipeline(containerName, 1);
-  }
-
-  /**
-   * Create a pipeline with single node replica.
-   *
-   * @return Pipeline with single node in it.
-   * @throws IOException
-   */
-  public static Pipeline createPipeline(String containerName, int numNodes)
-      throws IOException {
-    Preconditions.checkArgument(numNodes >= 1);
-    final List<DatanodeDetails> ids = new ArrayList<>(numNodes);
-    for (int i = 0; i < numNodes; i++) {
-      ids.add(GenesisUtil.createDatanodeDetails(UUID.randomUUID().toString()));
-    }
-    return createPipeline(containerName, ids);
-  }
-
-  public static Pipeline createPipeline(String containerName,
-      Iterable<DatanodeDetails> ids) throws IOException {
-    Objects.requireNonNull(ids, "ids == null");
-    Preconditions.checkArgument(ids.iterator().hasNext());
-    List<DatanodeDetails> dns = new ArrayList<>();
-    ids.forEach(dns::add);
-    final Pipeline pipeline = Pipeline.newBuilder()
-        .setState(Pipeline.PipelineState.OPEN)
-        .setId(PipelineID.randomId())
-        .setType(HddsProtos.ReplicationType.STAND_ALONE)
-        .setFactor(HddsProtos.ReplicationFactor.ONE)
-        .setNodes(dns)
-        .build();
-    return pipeline;
-  }
-
   @Benchmark
   public void createContainerBenchMark(BenchMarkContainerStateMap state,
       Blackhole bh) throws IOException {
@@ -177,8 +181,10 @@ public class BenchMarkContainerStateMap {
     return new ContainerInfo.Builder()
         .setState(CLOSED)
         .setPipelineID(pipeline.getId())
-        .setReplicationType(pipeline.getType())
-        .setReplicationFactor(pipeline.getFactor())
+        .setReplicationType(
+            pipeline.getReplicationConfig().getReplicationType())
+        .setReplicationFactor(
+            ReplicationConfig.getLegacyFactor(pipeline.getReplicationConfig()))
         .setUsedBytes(0)
         .setNumberOfKeys(0)
         .setStateEnterTime(Time.now())

@@ -20,6 +20,7 @@
 package org.apache.hadoop.ozone.client;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
@@ -29,6 +30,7 @@ import java.util.stream.Collectors;
 import org.apache.hadoop.hdds.protocol.StorageType;
 import org.apache.hadoop.ozone.OzoneAcl;
 import org.apache.hadoop.ozone.om.exceptions.OMException;
+import org.apache.hadoop.util.Time;
 
 /**
  * Ozone volume with in-memory state for testing.
@@ -37,10 +39,13 @@ public class OzoneVolumeStub extends OzoneVolume {
 
   private Map<String, OzoneBucketStub> buckets = new HashMap<>();
 
+  private ArrayList<OzoneAcl> aclList = new ArrayList<>();
+
   public OzoneVolumeStub(String name, String admin, String owner,
-      long quotaInBytes,
-      long creationTime, List<OzoneAcl> acls) {
-    super(name, admin, owner, quotaInBytes, creationTime, acls);
+      long quotaInBytes, long quotaInNamespace, long creationTime,
+      List<OzoneAcl> acls) {
+    super(name, admin, owner, quotaInBytes, quotaInNamespace, creationTime,
+        acls);
   }
 
   @Override
@@ -58,8 +63,7 @@ public class OzoneVolumeStub extends OzoneVolume {
         bucketName,
         bucketArgs.getStorageType(),
         bucketArgs.getVersioning(),
-        System.currentTimeMillis()));
-
+        Time.now()));
   }
 
   @Override
@@ -105,5 +109,26 @@ public class OzoneVolumeStub extends OzoneVolume {
     } else {
       throw new OMException("", OMException.ResultCodes.BUCKET_NOT_FOUND);
     }
+  }
+
+  @Override
+  public List<OzoneAcl> getAcls() {
+    return (List<OzoneAcl>)aclList.clone();
+  }
+
+  @Override
+  public boolean addAcl(OzoneAcl addAcl) throws IOException {
+    return aclList.add(addAcl);
+  }
+
+  @Override
+  public boolean removeAcl(OzoneAcl acl) throws IOException {
+    return aclList.remove(acl);
+  }
+
+  @Override
+  public boolean setAcl(List<OzoneAcl> acls) throws IOException {
+    aclList.clear();
+    return aclList.addAll(acls);
   }
 }

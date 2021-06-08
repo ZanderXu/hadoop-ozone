@@ -21,16 +21,15 @@ package org.apache.hadoop.ozone.om.request.bucket;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.stream.Collectors;
 
 import com.google.common.base.Optional;
 
 import org.apache.hadoop.ozone.OmUtils;
 import org.apache.hadoop.ozone.OzoneAcl;
+import org.apache.hadoop.ozone.OzoneConsts;
 import org.apache.hadoop.ozone.om.helpers.OmVolumeArgs;
 import org.apache.hadoop.ozone.om.helpers.OzoneAclUtil;
 import org.apache.hadoop.ozone.om.ratis.utils.OzoneManagerDoubleBufferHelper;
-import org.apache.hadoop.ozone.om.request.file.OMFileRequest;
 import org.apache.hadoop.ozone.om.request.util.OmResponseUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -69,6 +68,8 @@ import org.apache.hadoop.util.Time;
 import org.apache.hadoop.hdds.utils.db.cache.CacheKey;
 import org.apache.hadoop.hdds.utils.db.cache.CacheValue;
 
+import static org.apache.hadoop.ozone.om.exceptions.OMException.ResultCodes.BUCKET_ALREADY_EXISTS;
+import static org.apache.hadoop.ozone.om.exceptions.OMException.ResultCodes.VOLUME_NOT_FOUND;
 import static org.apache.hadoop.ozone.om.lock.OzoneManagerLock.Resource.VOLUME_LOCK;
 import static org.apache.hadoop.ozone.om.lock.OzoneManagerLock.Resource.BUCKET_LOCK;
 import static org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos
@@ -104,11 +105,27 @@ public class OMBucketCreateRequest extends OMClientRequest {
 
     BucketInfo.Builder newBucketInfo = bucketInfo.toBuilder();
 
-    // Set creation time.
-    newBucketInfo.setCreationTime(Time.now());
+    // Set creation time & modification time.
+    long initialTime = Time.now();
+    newBucketInfo.setCreationTime(initialTime)
+        .setModificationTime(initialTime);
 
     if (bucketInfo.hasBeinfo()) {
       newBucketInfo.setBeinfo(getBeinfo(kmsProvider, bucketInfo));
+    }
+
+    boolean hasSourceVolume = bucketInfo.hasSourceVolume();
+    boolean hasSourceBucket = bucketInfo.hasSourceBucket();
+
+    if (hasSourceBucket != hasSourceVolume) {
+      throw new OMException("Both source volume and source bucket are " +
+          "required for bucket links",
+          OMException.ResultCodes.INVALID_REQUEST);
+    }
+
+    if (hasSourceBucket && bucketInfo.hasBeinfo()) {
+      throw new OMException("Encryption cannot be set for bucket links",
+          OMException.ResultCodes.INVALID_REQUEST);
     }
 
     newCreateBucketRequest.setBucketInfo(newBucketInfo.build());
@@ -165,51 +182,48 @@ public class OMBucketCreateRequest extends OMClientRequest {
       //Check if the volume exists
       if (omVolumeArgs == null) {
         LOG.debug("volume: {} not found ", volumeName);
-        throw new OMException("Volume doesn't exist",
-            OMException.ResultCodes.VOLUME_NOT_FOUND);
+        throw new OMException("Volume doesn't exist", VOLUME_NOT_FOUND);
       }
 
       //Check if bucket already exists
-      OmBucketInfo dbBucketInfo = metadataManager.getBucketTable()
-          .getReadCopy(bucketKey);
-      if (dbBucketInfo != null) {
-        // Check if this transaction is a replay of ratis logs.
-        if (isReplay(ozoneManager, dbBucketInfo, transactionLogIndex)) {
-          // Replay implies the response has already been returned to
-          // the client. So take no further action and return a dummy
-          // OMClientResponse.
-          LOG.debug("Replayed Transaction {} ignored. Request: {}",
-              transactionLogIndex, createBucketRequest);
-          return new OMBucketCreateResponse(createReplayOMResponse(omResponse));
-        } else {
-          LOG.debug("bucket: {} already exists ", bucketName);
-          throw new OMException("Bucket already exist",
-              OMException.ResultCodes.BUCKET_ALREADY_EXISTS);
-        }
+      if (metadataManager.getBucketTable().isExist(bucketKey)) {
+        LOG.debug("bucket: {} already exists ", bucketName);
+        throw new OMException("Bucket already exist", BUCKET_ALREADY_EXISTS);
       }
+
+      //Check quotaInBytes to update
+      checkQuotaBytesValid(metadataManager, omVolumeArgs, omBucketInfo,
+          volumeKey);
 
       // Add objectID and updateID
       omBucketInfo.setObjectID(
-          OMFileRequest.getObjIDFromTxId(transactionLogIndex));
+          ozoneManager.getObjectIdFromTxId(transactionLogIndex));
       omBucketInfo.setUpdateID(transactionLogIndex,
           ozoneManager.isRatisEnabled());
 
       // Add default acls from volume.
       addDefaultAcls(omBucketInfo, omVolumeArgs);
 
+      // check namespace quota
+      checkQuotaInNamespace(omVolumeArgs, 1L);
+
+      // update used namespace for volume
+      omVolumeArgs.incrUsedNamespace(1L);
 
       // Update table cache.
+      metadataManager.getVolumeTable().addCacheEntry(new CacheKey<>(volumeKey),
+          new CacheValue<>(Optional.of(omVolumeArgs), transactionLogIndex));
       metadataManager.getBucketTable().addCacheEntry(new CacheKey<>(bucketKey),
           new CacheValue<>(Optional.of(omBucketInfo), transactionLogIndex));
 
       omResponse.setCreateBucketResponse(
           CreateBucketResponse.newBuilder().build());
       omClientResponse = new OMBucketCreateResponse(omResponse.build(),
-          omBucketInfo);
+          omBucketInfo, omVolumeArgs.copyObject());
     } catch (IOException ex) {
       exception = ex;
       omClientResponse = new OMBucketCreateResponse(
-          createErrorOMResponse(omResponse, exception), omBucketInfo);
+          createErrorOMResponse(omResponse, exception));
     } finally {
       addResponseToDoubleBuffer(transactionLogIndex, omClientResponse,
           ozoneManagerDoubleBufferHelper);
@@ -248,17 +262,15 @@ public class OMBucketCreateRequest extends OMClientRequest {
    */
   private void addDefaultAcls(OmBucketInfo omBucketInfo,
       OmVolumeArgs omVolumeArgs) {
-    // Add default acls from volume.
+    // Add default acls for bucket creator.
     List<OzoneAcl> acls = new ArrayList<>();
     if (omBucketInfo.getAcls() != null) {
       acls.addAll(omBucketInfo.getAcls());
     }
 
-    List<OzoneAcl> defaultVolumeAclList = omVolumeArgs.getAclMap()
-        .getDefaultAclList().stream().map(OzoneAcl::fromProtobuf)
-        .collect(Collectors.toList());
-
-    OzoneAclUtil.inheritDefaultAcls(acls, defaultVolumeAclList);
+    // Add default acls from volume.
+    List<OzoneAcl> defaultVolumeAcls = omVolumeArgs.getDefaultAcls();
+    OzoneAclUtil.inheritDefaultAcls(acls, defaultVolumeAcls);
     omBucketInfo.setAcls(acls);
   }
 
@@ -293,4 +305,56 @@ public class OMBucketCreateRequest extends OMClientRequest {
             CipherSuite.convert(metadata.getCipher())));
     return bekb.build();
   }
+
+  /**
+   * Check namespace quota.
+   */
+  private void checkQuotaInNamespace(OmVolumeArgs omVolumeArgs,
+      long allocatedNamespace) throws IOException {
+    if (omVolumeArgs.getQuotaInNamespace() > 0) {
+      long usedNamespace = omVolumeArgs.getUsedNamespace();
+      long quotaInNamespace = omVolumeArgs.getQuotaInNamespace();
+      long toUseNamespaceInTotal = usedNamespace + allocatedNamespace;
+      if (quotaInNamespace < toUseNamespaceInTotal) {
+        throw new OMException("The namespace quota of Volume:"
+            + omVolumeArgs.getVolume() + " exceeded: quotaInNamespace: "
+            + quotaInNamespace + " but namespace consumed: "
+            + toUseNamespaceInTotal + ".",
+            OMException.ResultCodes.QUOTA_EXCEEDED);
+      }
+    }
+  }
+
+  public boolean checkQuotaBytesValid(OMMetadataManager metadataManager,
+      OmVolumeArgs omVolumeArgs, OmBucketInfo omBucketInfo, String volumeKey)
+      throws IOException {
+    long quotaInBytes = omBucketInfo.getQuotaInBytes();
+    long volumeQuotaInBytes = omVolumeArgs.getQuotaInBytes();
+
+    long totalBucketQuota = 0;
+    if (quotaInBytes > 0) {
+      totalBucketQuota = quotaInBytes;
+    } else {
+      return false;
+    }
+
+    List<OmBucketInfo>  bucketList = metadataManager.listBuckets(
+        omVolumeArgs.getVolume(), null, null, Integer.MAX_VALUE);
+    for(OmBucketInfo bucketInfo : bucketList) {
+      long nextQuotaInBytes = bucketInfo.getQuotaInBytes();
+      if(nextQuotaInBytes > OzoneConsts.QUOTA_RESET) {
+        totalBucketQuota += nextQuotaInBytes;
+      }
+    }
+    if(volumeQuotaInBytes < totalBucketQuota
+        && volumeQuotaInBytes != OzoneConsts.QUOTA_RESET) {
+      throw new IllegalArgumentException("Total buckets quota in this volume " +
+          "should not be greater than volume quota : the total space quota is" +
+          " set to:" + totalBucketQuota + ". But the volume space quota is:" +
+          volumeQuotaInBytes);
+    }
+    return true;
+
+  }
+
 }

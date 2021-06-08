@@ -20,7 +20,7 @@ package org.apache.hadoop.hdds.tracing;
 import io.jaegertracing.internal.JaegerSpanContext;
 import io.jaegertracing.internal.exceptions.EmptyTracerStateStringException;
 import io.jaegertracing.internal.exceptions.MalformedTracerStateStringException;
-import org.apache.hadoop.test.LambdaTestUtils;
+import org.apache.ozone.test.LambdaTestUtils;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -45,7 +45,7 @@ class TestStringCodec {
         () -> codec.extract(sb));
     sb.append(":66");
     JaegerSpanContext context = codec.extract(sb);
-    String expectedContextString = new String("123:456:789:66");
+    String expectedContextString = "123:456:789:66";
     assertTrue(context.getTraceId().equals("123"));
     assertTrue(context.toString().equals(expectedContextString));
   }

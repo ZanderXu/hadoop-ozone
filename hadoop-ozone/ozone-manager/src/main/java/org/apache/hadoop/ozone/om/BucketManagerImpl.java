@@ -17,7 +17,6 @@
 package org.apache.hadoop.ozone.om;
 
 import java.io.IOException;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 
@@ -25,7 +24,7 @@ import org.apache.hadoop.crypto.CipherSuite;
 import org.apache.hadoop.crypto.CryptoProtocolVersion;
 import org.apache.hadoop.crypto.key.KeyProvider;
 import org.apache.hadoop.crypto.key.KeyProviderCryptoExtension;
-import org.apache.hadoop.fs.CommonConfigurationKeys;
+import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
 import org.apache.hadoop.hdds.protocol.StorageType;
 import org.apache.hadoop.ozone.OzoneAcl;
 import org.apache.hadoop.ozone.om.exceptions.OMException;
@@ -40,7 +39,7 @@ import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.util.Time;
 
 import com.google.common.base.Preconditions;
-import org.iq80.leveldb.DBException;
+import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -116,10 +115,10 @@ public class BucketManagerImpl implements BucketManager {
     String volumeName = bucketInfo.getVolumeName();
     String bucketName = bucketInfo.getBucketName();
     boolean acquiredBucketLock = false;
-    metadataManager.getLock().acquireLock(VOLUME_LOCK, volumeName);
+    metadataManager.getLock().acquireWriteLock(VOLUME_LOCK, volumeName);
     try {
-      acquiredBucketLock = metadataManager.getLock().acquireLock(BUCKET_LOCK,
-          volumeName, bucketName);
+      acquiredBucketLock = metadataManager.getLock().acquireWriteLock(
+          BUCKET_LOCK, volumeName, bucketName);
       String volumeKey = metadataManager.getVolumeKey(volumeName);
       String bucketKey = metadataManager.getBucketKey(volumeName, bucketName);
       OmVolumeArgs volumeArgs = metadataManager.getVolumeTable().get(volumeKey);
@@ -136,46 +135,31 @@ public class BucketManagerImpl implements BucketManager {
         throw new OMException("Bucket already exist",
             OMException.ResultCodes.BUCKET_ALREADY_EXISTS);
       }
-      BucketEncryptionKeyInfo bek = bucketInfo.getEncryptionKeyInfo();
-      BucketEncryptionKeyInfo.Builder bekb = null;
-      if (bek != null) {
-        if (kmsProvider == null) {
-          throw new OMException("Invalid KMS provider, check configuration " +
-              CommonConfigurationKeys.HADOOP_SECURITY_KEY_PROVIDER_PATH,
-              OMException.ResultCodes.INVALID_KMS_PROVIDER);
-        }
-        if (bek.getKeyName() == null) {
-          throw new OMException("Bucket encryption key needed.", OMException
-              .ResultCodes.BUCKET_ENCRYPTION_KEY_NOT_FOUND);
-        }
-        // Talk to KMS to retrieve the bucket encryption key info.
-        KeyProvider.Metadata metadata = getKMSProvider().getMetadata(
-            bek.getKeyName());
-        if (metadata == null) {
-          throw new OMException("Bucket encryption key " + bek.getKeyName()
-              + " doesn't exist.",
-              OMException.ResultCodes.BUCKET_ENCRYPTION_KEY_NOT_FOUND);
-        }
-        // If the provider supports pool for EDEKs, this will fill in the pool
-        kmsProvider.warmUpEncryptedKeys(bek.getKeyName());
-        bekb = new BucketEncryptionKeyInfo.Builder()
-            .setKeyName(bek.getKeyName())
-            .setVersion(CryptoProtocolVersion.ENCRYPTION_ZONES)
-            .setSuite(CipherSuite.convert(metadata.getCipher()));
-      }
-      List<OzoneAcl> acls = new ArrayList<>();
-      acls.addAll(bucketInfo.getAcls());
-      volumeArgs.getAclMap().getDefaultAclList().forEach(
-          a -> acls.add(OzoneAcl.fromProtobufWithAccessType(a)));
 
-      OmBucketInfo.Builder omBucketInfoBuilder = OmBucketInfo.newBuilder()
-          .setVolumeName(bucketInfo.getVolumeName())
-          .setBucketName(bucketInfo.getBucketName())
-          .setAcls(acls)
-          .setStorageType(bucketInfo.getStorageType())
-          .setIsVersionEnabled(bucketInfo.getIsVersionEnabled())
-          .setCreationTime(Time.now())
-          .addAllMetadata(bucketInfo.getMetadata());
+      BucketEncryptionKeyInfo bek = bucketInfo.getEncryptionKeyInfo();
+
+      boolean hasSourceVolume = bucketInfo.getSourceVolume() != null;
+      boolean hasSourceBucket = bucketInfo.getSourceBucket() != null;
+
+      if (hasSourceBucket != hasSourceVolume) {
+        throw new OMException("Both source volume and source bucket are " +
+            "required for bucket links",
+            OMException.ResultCodes.INVALID_REQUEST);
+      }
+
+      if (bek != null && hasSourceBucket) {
+        throw new OMException("Encryption cannot be set for bucket links",
+            OMException.ResultCodes.INVALID_REQUEST);
+      }
+
+      BucketEncryptionKeyInfo.Builder bekb =
+          createBucketEncryptionKeyInfoBuilder(bek);
+
+      OmBucketInfo.Builder omBucketInfoBuilder = bucketInfo.toBuilder()
+          .setCreationTime(Time.now());
+
+      OzoneAclUtil.inheritDefaultAcls(omBucketInfoBuilder.getAcls(),
+          volumeArgs.getDefaultAcls());
 
       if (bekb != null) {
         omBucketInfoBuilder.setBucketEncryptionKey(bekb.build());
@@ -183,8 +167,15 @@ public class BucketManagerImpl implements BucketManager {
 
       OmBucketInfo omBucketInfo = omBucketInfoBuilder.build();
       commitBucketInfoToDB(omBucketInfo);
-      LOG.debug("created bucket: {} in volume: {}", bucketName, volumeName);
-    } catch (IOException | DBException ex) {
+      if (hasSourceBucket) {
+        LOG.debug("created link {}/{} to bucket: {}/{}",
+            volumeName, bucketName,
+            omBucketInfo.getSourceVolume(), omBucketInfo.getSourceBucket());
+      } else {
+        LOG.debug("created bucket: {} in volume: {}", bucketName,
+            volumeName);
+      }
+    } catch (IOException ex) {
       if (!(ex instanceof OMException)) {
         LOG.error("Bucket creation failed for bucket:{} in volume:{}",
             bucketName, volumeName, ex);
@@ -192,11 +183,43 @@ public class BucketManagerImpl implements BucketManager {
       throw ex;
     } finally {
       if (acquiredBucketLock) {
-        metadataManager.getLock().releaseLock(BUCKET_LOCK, volumeName,
+        metadataManager.getLock().releaseWriteLock(BUCKET_LOCK, volumeName,
             bucketName);
       }
-      metadataManager.getLock().releaseLock(VOLUME_LOCK, volumeName);
+      metadataManager.getLock().releaseWriteLock(VOLUME_LOCK, volumeName);
     }
+  }
+
+  @Nullable
+  public BucketEncryptionKeyInfo.Builder createBucketEncryptionKeyInfoBuilder(
+      BucketEncryptionKeyInfo bek) throws IOException {
+    BucketEncryptionKeyInfo.Builder bekb = null;
+    if (bek != null) {
+      if (kmsProvider == null) {
+        throw new OMException("Invalid KMS provider, check configuration " +
+            CommonConfigurationKeysPublic.HADOOP_SECURITY_KEY_PROVIDER_PATH,
+            OMException.ResultCodes.INVALID_KMS_PROVIDER);
+      }
+      if (bek.getKeyName() == null) {
+        throw new OMException("Bucket encryption key needed.", OMException
+            .ResultCodes.BUCKET_ENCRYPTION_KEY_NOT_FOUND);
+      }
+      // Talk to KMS to retrieve the bucket encryption key info.
+      KeyProvider.Metadata metadata = getKMSProvider().getMetadata(
+          bek.getKeyName());
+      if (metadata == null) {
+        throw new OMException("Bucket encryption key " + bek.getKeyName()
+            + " doesn't exist.",
+            OMException.ResultCodes.BUCKET_ENCRYPTION_KEY_NOT_FOUND);
+      }
+      // If the provider supports pool for EDEKs, this will fill in the pool
+      kmsProvider.warmUpEncryptedKeys(bek.getKeyName());
+      bekb = new BucketEncryptionKeyInfo.Builder()
+          .setKeyName(bek.getKeyName())
+          .setVersion(CryptoProtocolVersion.ENCRYPTION_ZONES)
+          .setSuite(CipherSuite.convert(metadata.getCipher()));
+    }
+    return bekb;
   }
 
   private void commitBucketInfoToDB(OmBucketInfo omBucketInfo)
@@ -231,7 +254,7 @@ public class BucketManagerImpl implements BucketManager {
             BUCKET_NOT_FOUND);
       }
       return value;
-    } catch (IOException | DBException ex) {
+    } catch (IOException ex) {
       if (!(ex instanceof OMException)) {
         LOG.error("Exception while getting bucket info for bucket: {}",
             bucketName, ex);
@@ -254,7 +277,8 @@ public class BucketManagerImpl implements BucketManager {
     Preconditions.checkNotNull(args);
     String volumeName = args.getVolumeName();
     String bucketName = args.getBucketName();
-    metadataManager.getLock().acquireLock(BUCKET_LOCK, volumeName, bucketName);
+    metadataManager.getLock().acquireWriteLock(BUCKET_LOCK, volumeName,
+        bucketName);
     try {
       String bucketKey = metadataManager.getBucketKey(volumeName, bucketName);
       OmBucketInfo oldBucketInfo =
@@ -301,14 +325,14 @@ public class BucketManagerImpl implements BucketManager {
 
 
       commitBucketInfoToDB(omBucketInfo);
-    } catch (IOException | DBException ex) {
+    } catch (IOException ex) {
       if (!(ex instanceof OMException)) {
         LOG.error("Setting bucket property failed for bucket:{} in volume:{}",
             bucketName, volumeName, ex);
       }
       throw ex;
     } finally {
-      metadataManager.getLock().releaseLock(BUCKET_LOCK, volumeName,
+      metadataManager.getLock().releaseWriteLock(BUCKET_LOCK, volumeName,
           bucketName);
     }
   }
@@ -325,7 +349,8 @@ public class BucketManagerImpl implements BucketManager {
       throws IOException {
     Preconditions.checkNotNull(volumeName);
     Preconditions.checkNotNull(bucketName);
-    metadataManager.getLock().acquireLock(BUCKET_LOCK, volumeName, bucketName);
+    metadataManager.getLock().acquireWriteLock(BUCKET_LOCK, volumeName,
+        bucketName);
     try {
       //Check if bucket exists
       String bucketKey = metadataManager.getBucketKey(volumeName, bucketName);
@@ -348,7 +373,7 @@ public class BucketManagerImpl implements BucketManager {
       }
       throw ex;
     } finally {
-      metadataManager.getLock().releaseLock(BUCKET_LOCK, volumeName,
+      metadataManager.getLock().releaseWriteLock(BUCKET_LOCK, volumeName,
           bucketName);
     }
   }
@@ -390,7 +415,7 @@ public class BucketManagerImpl implements BucketManager {
     String volume = obj.getVolumeName();
     String bucket = obj.getBucketName();
     boolean changed = false;
-    metadataManager.getLock().acquireLock(BUCKET_LOCK, volume, bucket);
+    metadataManager.getLock().acquireWriteLock(BUCKET_LOCK, volume, bucket);
     try {
       String dbBucketKey = metadataManager.getBucketKey(volume, bucket);
       OmBucketInfo bucketInfo =
@@ -412,7 +437,7 @@ public class BucketManagerImpl implements BucketManager {
       }
       throw ex;
     } finally {
-      metadataManager.getLock().releaseLock(BUCKET_LOCK, volume, bucket);
+      metadataManager.getLock().releaseWriteLock(BUCKET_LOCK, volume, bucket);
     }
 
     return changed;
@@ -437,7 +462,7 @@ public class BucketManagerImpl implements BucketManager {
     String volume = obj.getVolumeName();
     String bucket = obj.getBucketName();
     boolean removed = false;
-    metadataManager.getLock().acquireLock(BUCKET_LOCK, volume, bucket);
+    metadataManager.getLock().acquireWriteLock(BUCKET_LOCK, volume, bucket);
     try {
       String dbBucketKey = metadataManager.getBucketKey(volume, bucket);
       OmBucketInfo bucketInfo =
@@ -458,7 +483,7 @@ public class BucketManagerImpl implements BucketManager {
       }
       throw ex;
     } finally {
-      metadataManager.getLock().releaseLock(BUCKET_LOCK, volume, bucket);
+      metadataManager.getLock().releaseWriteLock(BUCKET_LOCK, volume, bucket);
     }
     return removed;
   }
@@ -481,7 +506,7 @@ public class BucketManagerImpl implements BucketManager {
     }
     String volume = obj.getVolumeName();
     String bucket = obj.getBucketName();
-    metadataManager.getLock().acquireLock(BUCKET_LOCK, volume, bucket);
+    metadataManager.getLock().acquireWriteLock(BUCKET_LOCK, volume, bucket);
     try {
       String dbBucketKey = metadataManager.getBucketKey(volume, bucket);
       OmBucketInfo bucketInfo =
@@ -500,7 +525,7 @@ public class BucketManagerImpl implements BucketManager {
       }
       throw ex;
     } finally {
-      metadataManager.getLock().releaseLock(BUCKET_LOCK, volume, bucket);
+      metadataManager.getLock().releaseWriteLock(BUCKET_LOCK, volume, bucket);
     }
     return true;
   }
@@ -534,7 +559,7 @@ public class BucketManagerImpl implements BucketManager {
       return bucketInfo.getAcls();
     } catch (IOException ex) {
       if (!(ex instanceof OMException)) {
-        LOG.error("Get acl operation failed for bucket:{}/{} acl:{}",
+        LOG.error("Get acl operation failed for bucket:{}/{}.",
             volume, bucket, ex);
       }
       throw ex;
@@ -579,7 +604,7 @@ public class BucketManagerImpl implements BucketManager {
       if(ex instanceof OMException) {
         throw (OMException) ex;
       }
-      LOG.error("CheckAccess operation failed for bucket:{}/{} acl:{}",
+      LOG.error("CheckAccess operation failed for bucket:{}/{}.",
           volume, bucket, ex);
       throw new OMException("Check access operation failed for " +
           "bucket:" + bucket, ex, INTERNAL_ERROR);

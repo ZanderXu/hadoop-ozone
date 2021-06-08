@@ -18,42 +18,35 @@
 
 package org.apache.hadoop.hdds.scm;
 
+import java.io.Closeable;
+import java.io.IOException;
+import java.security.cert.X509Certificate;
+import java.util.List;
+import java.util.concurrent.Callable;
+import java.util.concurrent.TimeUnit;
+
+import org.apache.hadoop.hdds.conf.Config;
+import org.apache.hadoop.hdds.conf.ConfigGroup;
+import org.apache.hadoop.hdds.conf.ConfigType;
+import org.apache.hadoop.hdds.conf.ConfigurationSource;
+import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
+import org.apache.hadoop.hdds.scm.pipeline.Pipeline;
+import org.apache.hadoop.ozone.OzoneConfigKeys;
+import org.apache.hadoop.ozone.OzoneSecurityUtil;
+import org.apache.hadoop.security.UserGroupInformation;
+
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
 import com.google.common.cache.RemovalListener;
 import com.google.common.cache.RemovalNotification;
-
-import org.apache.hadoop.hdds.conf.Config;
-import org.apache.hadoop.hdds.conf.ConfigGroup;
-import org.apache.hadoop.hdds.conf.ConfigType;
-import org.apache.hadoop.hdds.conf.ConfigurationSource;
-import org.apache.hadoop.hdds.conf.OzoneConfiguration;
-import org.apache.hadoop.hdds.scm.pipeline.Pipeline;
-import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
-import org.apache.hadoop.hdds.security.exception.SCMSecurityException;
-import org.apache.hadoop.hdds.security.x509.certificate.utils.CertificateCodec;
-import org.apache.hadoop.ozone.OzoneConfigKeys;
-import org.apache.hadoop.ozone.OzoneSecurityUtil;
-import org.apache.hadoop.security.UserGroupInformation;
-import org.apache.ratis.thirdparty.com.google.protobuf.ByteString;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import java.io.Closeable;
-import java.io.IOException;
-import java.nio.ByteBuffer;
-import java.security.cert.CertificateException;
-import java.security.cert.X509Certificate;
-import java.util.concurrent.Callable;
-import java.util.concurrent.TimeUnit;
-import java.util.function.Function;
-
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static org.apache.hadoop.hdds.conf.ConfigTag.OZONE;
 import static org.apache.hadoop.hdds.conf.ConfigTag.PERFORMANCE;
 import static org.apache.hadoop.hdds.scm.exceptions.SCMException.ResultCodes.NO_REPLICA_FOUND;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * XceiverClientManager is responsible for the lifecycle of XceiverClient
@@ -67,13 +60,13 @@ import static org.apache.hadoop.hdds.scm.exceptions.SCMException.ResultCodes.NO_
  * without reestablishing connection. But the connection will be closed if
  * not being used for a period of time.
  */
-public class XceiverClientManager implements Closeable {
+public class XceiverClientManager implements Closeable, XceiverClientFactory {
   private static final Logger LOG =
       LoggerFactory.getLogger(XceiverClientManager.class);
   //TODO : change this to SCM configuration class
   private final ConfigurationSource conf;
   private final Cache<String, XceiverClientSpi> clientCache;
-  private X509Certificate caCert;
+  private List<X509Certificate> caCerts;
 
   private static XceiverClientMetrics metrics;
   private boolean isSecurityEnabled;
@@ -86,26 +79,20 @@ public class XceiverClientManager implements Closeable {
    * @param conf configuration
    */
   public XceiverClientManager(ConfigurationSource conf) throws IOException {
-    this(conf, OzoneConfiguration.of(conf).getObject(ScmClientConfig.class),
-        null);
+    this(conf, conf.getObject(ScmClientConfig.class), null);
   }
 
   public XceiverClientManager(ConfigurationSource conf,
       ScmClientConfig clientConf,
-      String caCertPem) throws IOException {
+      List<X509Certificate> caCerts) throws IOException {
     Preconditions.checkNotNull(clientConf);
     Preconditions.checkNotNull(conf);
     long staleThresholdMs = clientConf.getStaleThreshold(MILLISECONDS);
     this.conf = conf;
     this.isSecurityEnabled = OzoneSecurityUtil.isSecurityEnabled(conf);
     if (isSecurityEnabled) {
-      Preconditions.checkNotNull(caCertPem);
-      try {
-        this.caCert = CertificateCodec.getX509Cert(caCertPem);
-      } catch (CertificateException ex) {
-        throw new SCMSecurityException("Error: Fail to get SCM CA certificate",
-            ex);
-      }
+      Preconditions.checkNotNull(caCerts);
+      this.caCerts = caCerts;
     }
 
     this.clientCache = CacheBuilder.newBuilder()
@@ -145,6 +132,7 @@ public class XceiverClientManager implements Closeable {
    * @return XceiverClientSpi connected to a container
    * @throws IOException if a XceiverClientSpi cannot be acquired
    */
+  @Override
   public XceiverClientSpi acquireClient(Pipeline pipeline)
       throws IOException {
     return acquireClient(pipeline, false);
@@ -160,6 +148,7 @@ public class XceiverClientManager implements Closeable {
    * @return XceiverClientSpi connected to a container
    * @throws IOException if a XceiverClientSpi cannot be acquired
    */
+  @Override
   public XceiverClientSpi acquireClientForReadData(Pipeline pipeline)
       throws IOException {
     return acquireClient(pipeline, true);
@@ -185,6 +174,7 @@ public class XceiverClientManager implements Closeable {
    * @param client client to release
    * @param invalidateClient if true, invalidates the client in cache
    */
+  @Override
   public void releaseClient(XceiverClientSpi client, boolean invalidateClient) {
     releaseClient(client, invalidateClient, false);
   }
@@ -195,6 +185,7 @@ public class XceiverClientManager implements Closeable {
    * @param client client to release
    * @param invalidateClient if true, invalidates the client in cache
    */
+  @Override
   public void releaseClientForReadData(XceiverClientSpi client,
       boolean invalidateClient) {
     releaseClient(client, invalidateClient, true);
@@ -234,10 +225,10 @@ public class XceiverClientManager implements Closeable {
             switch (type) {
             case RATIS:
               client = XceiverClientRatis.newXceiverClientRatis(pipeline, conf,
-                  caCert);
+                  caCerts);
               break;
             case STAND_ALONE:
-              client = new XceiverClientGrpc(pipeline, conf, caCert);
+              client = new XceiverClientGrpc(pipeline, conf, caCerts);
               break;
             case CHAINED:
             default:
@@ -278,10 +269,6 @@ public class XceiverClientManager implements Closeable {
     if (metrics != null) {
       metrics.unRegister();
     }
-  }
-
-  public Function<ByteBuffer, ByteString> byteBufferToByteStringConversion(){
-    return ByteStringConversion.createByteBufferConversion(conf);
   }
 
   /**

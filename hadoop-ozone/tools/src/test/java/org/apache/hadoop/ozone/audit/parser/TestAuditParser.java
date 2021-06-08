@@ -37,9 +37,14 @@ import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.PrintStream;
+import java.io.UnsupportedEncodingException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+
+import static java.nio.charset.StandardCharsets.UTF_8;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 /**
  * Tests AuditParser.
@@ -53,9 +58,12 @@ public class TestAuditParser {
   private final ByteArrayOutputStream err = new ByteArrayOutputStream();
   private static final PrintStream OLD_OUT = System.out;
   private static final PrintStream OLD_ERR = System.err;
+  private static final String DEFAULT_CODING = UTF_8.name();
   private static String dbName;
   private static final String LOGS = TestAuditParser.class
       .getClassLoader().getResource("testaudit.log").getPath();
+  private static final String LOGS1 = TestAuditParser.class
+      .getClassLoader().getResource("testloadaudit.log").getPath();
   /**
    * Creates output directory which will be used by the test-cases.
    * If a test-case needs a separate directory, it has to create a random
@@ -73,9 +81,9 @@ public class TestAuditParser {
   }
 
   @Before
-  public void setup() {
-    System.setOut(new PrintStream(OUT));
-    System.setErr(new PrintStream(err));
+  public void setup() throws UnsupportedEncodingException {
+    System.setOut(new PrintStream(OUT, false, DEFAULT_CODING));
+    System.setErr(new PrintStream(err, false, DEFAULT_CODING));
   }
 
   @After
@@ -118,7 +126,10 @@ public class TestAuditParser {
         };
     cmd.parseWithHandlers(new CommandLine.RunLast(),
         exceptionHandler, args);
-    Assert.assertTrue(OUT.toString().contains(msg));
+    try {
+      Assert.assertTrue(OUT.toString(DEFAULT_CODING).contains(msg));
+    } catch (UnsupportedEncodingException ignored) {
+    }
   }
 
   /**
@@ -131,8 +142,8 @@ public class TestAuditParser {
         "DELETE_KEY\t3\t\n" +
             "ALLOCATE_KEY\t2\t\n" +
             "COMMIT_KEY\t2\t\n" +
-            "CREATE_BUCKET\t1\t\n" +
-            "CREATE_VOLUME\t1\t\n\n");
+            "CREATE_BUCKET\t2\t\n" +
+            "CREATE_VOLUME\t2\t\n\n");
   }
 
   /**
@@ -141,7 +152,7 @@ public class TestAuditParser {
   @Test
   public void testTemplateTop5Users() {
     String[] args = new String[]{dbName, "template", "top5users"};
-    execute(args, "hadoop\t9\t\n");
+    execute(args, "hadoop\t12\t\n");
   }
 
   /**
@@ -153,9 +164,9 @@ public class TestAuditParser {
     execute(args,
         "2018-09-06 01:57:22\t3\t\n" +
             "2018-09-06 01:58:08\t1\t\n" +
+            "2018-09-06 01:58:09\t1\t\n" +
             "2018-09-06 01:58:18\t1\t\n" +
-            "2018-09-06 01:59:36\t1\t\n" +
-            "2018-09-06 01:59:41\t1\t\n");
+            "2018-09-06 01:59:18\t1\t\n");
   }
 
   /**
@@ -166,7 +177,22 @@ public class TestAuditParser {
     String[] args = new String[]{dbName, "query",
         "select count(*) from audit"};
     execute(args,
-        "9");
+        "12");
+  }
+
+  /**
+   * Test to execute load audit log.
+   */
+  @Test
+  public void testLoadCommand() {
+    String[] args1 = new String[]{dbName, "load", LOGS1};
+    try{
+      execute(args1, "");
+      fail("No exception thrown.");
+    } catch (Exception e) {
+      assertTrue(e.getMessage()
+          .contains("java.lang.ArrayIndexOutOfBoundsException: 5"));
+    }
   }
 
   /**

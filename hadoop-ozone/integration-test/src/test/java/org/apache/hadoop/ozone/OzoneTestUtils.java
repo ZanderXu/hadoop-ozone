@@ -23,11 +23,14 @@ import java.util.List;
 import org.apache.hadoop.hdds.client.BlockID;
 import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
 import org.apache.hadoop.hdds.scm.container.ContainerID;
+import org.apache.hadoop.hdds.scm.container.ContainerInfo;
+import org.apache.hadoop.hdds.scm.events.SCMEvents;
 import org.apache.hadoop.hdds.scm.server.StorageContainerManager;
+import org.apache.hadoop.hdds.server.events.EventPublisher;
 import org.apache.hadoop.ozone.om.exceptions.OMException;
 import org.apache.hadoop.ozone.om.helpers.OmKeyLocationInfo;
 import org.apache.hadoop.ozone.om.helpers.OmKeyLocationInfoGroup;
-import org.apache.hadoop.test.LambdaTestUtils.VoidCallable;
+import org.apache.ozone.test.LambdaTestUtils.VoidCallable;
 
 import org.apache.ratis.util.function.CheckedConsumer;
 import org.junit.Assert;
@@ -56,23 +59,40 @@ public final class OzoneTestUtils {
       StorageContainerManager scm) throws Exception {
     performOperationOnKeyContainers((blockID) -> {
       if (scm.getContainerManager()
-          .getContainer(ContainerID.valueof(blockID.getContainerID()))
+          .getContainer(ContainerID.valueOf(blockID.getContainerID()))
           .getState() == HddsProtos.LifeCycleState.OPEN) {
         scm.getContainerManager()
-            .updateContainerState(ContainerID.valueof(blockID.getContainerID()),
+            .updateContainerState(ContainerID.valueOf(blockID.getContainerID()),
                 HddsProtos.LifeCycleEvent.FINALIZE);
       }
       if (scm.getContainerManager()
-          .getContainer(ContainerID.valueof(blockID.getContainerID()))
+          .getContainer(ContainerID.valueOf(blockID.getContainerID()))
           .getState() == HddsProtos.LifeCycleState.CLOSING) {
         scm.getContainerManager()
-            .updateContainerState(ContainerID.valueof(blockID.getContainerID()),
+            .updateContainerState(ContainerID.valueOf(blockID.getContainerID()),
                 HddsProtos.LifeCycleEvent.CLOSE);
       }
       Assert.assertFalse(scm.getContainerManager()
-          .getContainer(ContainerID.valueof(blockID.getContainerID()))
+          .getContainer(ContainerID.valueOf(blockID.getContainerID()))
           .isOpen());
     }, omKeyLocationInfoGroups);
+  }
+
+  /**
+   * Close all containers.
+   *
+   * @param eventPublisher event publisher.
+   * @param scm StorageContainerManager instance.
+   * @return true if close containers is successful.
+   * @throws IOException
+   */
+  public static void closeAllContainers(EventPublisher eventPublisher,
+      StorageContainerManager scm) {
+    for (ContainerInfo container :
+        scm.getContainerManager().getContainers()) {
+      eventPublisher.fireEvent(SCMEvents.CLOSE_CONTAINER,
+          container.containerID());
+    }
   }
 
   /**
@@ -85,7 +105,7 @@ public final class OzoneTestUtils {
    */
   public static void performOperationOnKeyContainers(
       CheckedConsumer<BlockID, Exception> consumer,
-      List<OmKeyLocationInfoGroup> omKeyLocationInfoGroups) throws Exception {
+      List<OmKeyLocationInfoGroup> omKeyLocationInfoGroups) throws Exception{
 
     for (OmKeyLocationInfoGroup omKeyLocationInfoGroup :
         omKeyLocationInfoGroups) {

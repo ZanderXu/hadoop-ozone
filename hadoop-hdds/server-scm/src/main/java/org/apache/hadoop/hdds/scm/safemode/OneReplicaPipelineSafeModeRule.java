@@ -17,31 +17,36 @@
 
 package org.apache.hadoop.hdds.scm.safemode;
 
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Preconditions;
-import org.apache.hadoop.hdds.conf.ConfigurationSource;
-import org.apache.hadoop.hdds.HddsConfigKeys;
-import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
-import org.apache.hadoop.hdds.scm.events.SCMEvents;
-import org.apache.hadoop.hdds.scm.pipeline.Pipeline;
-import org.apache.hadoop.hdds.scm.pipeline.PipelineID;
-import org.apache.hadoop.hdds.scm.pipeline.PipelineManager;
-import org.apache.hadoop.hdds.server.events.EventQueue;
-import org.apache.hadoop.hdds.server.events.TypedEvent;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import java.util.HashSet;
 import java.util.Set;
 import java.util.stream.Collectors;
 
+import org.apache.hadoop.hdds.HddsConfigKeys;
+import org.apache.hadoop.hdds.client.RatisReplicationConfig;
+import org.apache.hadoop.hdds.conf.ConfigurationSource;
+import org.apache.hadoop.hdds.protocol.proto.HddsProtos.ReplicationFactor;
+import org.apache.hadoop.hdds.protocol.proto.StorageContainerDatanodeProtocolProtos.PipelineReport;
+import org.apache.hadoop.hdds.scm.events.SCMEvents;
+import org.apache.hadoop.hdds.scm.pipeline.Pipeline;
+import org.apache.hadoop.hdds.scm.pipeline.PipelineID;
+import org.apache.hadoop.hdds.scm.pipeline.PipelineManager;
+import org.apache.hadoop.hdds.scm.pipeline.PipelineNotFoundException;
+import org.apache.hadoop.hdds.scm.server.SCMDatanodeHeartbeatDispatcher.PipelineReportFromDatanode;
+import org.apache.hadoop.hdds.server.events.EventQueue;
+import org.apache.hadoop.hdds.server.events.TypedEvent;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 /**
  * This rule covers whether we have at least one datanode is reported for each
- * pipeline. This rule is for all open containers, we have at least one
+ * open pipeline. This rule is for all open containers, we have at least one
  * replica available for read when we exit safe mode.
  */
 public class OneReplicaPipelineSafeModeRule extends
-    SafeModeExitRule<Pipeline> {
+    SafeModeExitRule<PipelineReportFromDatanode> {
 
   private static final Logger LOG =
       LoggerFactory.getLogger(OneReplicaPipelineSafeModeRule.class);
@@ -50,6 +55,7 @@ public class OneReplicaPipelineSafeModeRule extends
   private Set<PipelineID> reportedPipelineIDSet = new HashSet<>();
   private Set<PipelineID> oldPipelineIDSet;
   private int currentReportedPipelineCount = 0;
+  private PipelineManager pipelineManager;
 
 
   public OneReplicaPipelineSafeModeRule(String ruleName, EventQueue eventQueue,
@@ -68,9 +74,10 @@ public class OneReplicaPipelineSafeModeRule extends
             HDDS_SCM_SAFEMODE_ONE_NODE_REPORTED_PIPELINE_PCT  +
             " value should be >= 0.0 and <= 1.0");
 
+    this.pipelineManager = pipelineManager;
     oldPipelineIDSet = pipelineManager.getPipelines(
-        HddsProtos.ReplicationType.RATIS,
-        HddsProtos.ReplicationFactor.THREE)
+        new RatisReplicationConfig(ReplicationFactor.THREE),
+        Pipeline.PipelineState.OPEN)
         .stream().map(p -> p.getId()).collect(Collectors.toSet());
     int totalPipelineCount = oldPipelineIDSet.size();
 
@@ -85,29 +92,37 @@ public class OneReplicaPipelineSafeModeRule extends
   }
 
   @Override
-  protected TypedEvent<Pipeline> getEventType() {
-    return SCMEvents.OPEN_PIPELINE;
+  protected TypedEvent<PipelineReportFromDatanode> getEventType() {
+    return SCMEvents.PIPELINE_REPORT;
   }
 
   @Override
   protected boolean validate() {
-    if (currentReportedPipelineCount >= thresholdCount) {
-      return true;
-    }
-    return false;
+    return currentReportedPipelineCount >= thresholdCount;
   }
 
   @Override
-  protected void process(Pipeline pipeline) {
-    Preconditions.checkNotNull(pipeline);
-    if (pipeline.getType() == HddsProtos.ReplicationType.RATIS &&
-        pipeline.getFactor() == HddsProtos.ReplicationFactor.THREE &&
-        !reportedPipelineIDSet.contains(pipeline.getId())) {
-      if (oldPipelineIDSet.contains(pipeline.getId())) {
-        getSafeModeMetrics()
-            .incCurrentHealthyPipelinesWithAtleastOneReplicaReportedCount();
-        currentReportedPipelineCount++;
-        reportedPipelineIDSet.add(pipeline.getId());
+  protected void process(PipelineReportFromDatanode report) {
+    Preconditions.checkNotNull(report);
+    for (PipelineReport report1 : report.getReport().getPipelineReportList()) {
+      Pipeline pipeline;
+      try {
+        pipeline = pipelineManager.getPipeline(
+            PipelineID.getFromProtobuf(report1.getPipelineID()));
+      } catch (PipelineNotFoundException pnfe) {
+        continue;
+      }
+
+      if (RatisReplicationConfig
+          .hasFactor(pipeline.getReplicationConfig(), ReplicationFactor.THREE)
+          && pipeline.isOpen() &&
+          !reportedPipelineIDSet.contains(pipeline.getId())) {
+        if (oldPipelineIDSet.contains(pipeline.getId())) {
+          getSafeModeMetrics().
+              incCurrentHealthyPipelinesWithAtleastOneReplicaReportedCount();
+          currentReportedPipelineCount++;
+          reportedPipelineIDSet.add(pipeline.getId());
+        }
       }
     }
 
@@ -133,5 +148,15 @@ public class OneReplicaPipelineSafeModeRule extends
   @VisibleForTesting
   public int getCurrentReportedPipelineCount() {
     return currentReportedPipelineCount;
+  }
+
+  @Override
+  public String getStatusText() {
+    return String
+        .format(
+            "reported Ratis/THREE pipelines with at least one datanode (=%d) "
+                + ">= threshold (=%d)",
+            this.currentReportedPipelineCount,
+            this.thresholdCount);
   }
 }

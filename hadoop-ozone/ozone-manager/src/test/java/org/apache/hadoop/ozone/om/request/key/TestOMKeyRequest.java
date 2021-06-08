@@ -20,9 +20,16 @@ package org.apache.hadoop.ozone.om.request.key;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Random;
 import java.util.UUID;
 
+import org.apache.commons.lang3.tuple.Pair;
+import org.apache.hadoop.ozone.om.ResolvedBucket;
+import org.apache.hadoop.ozone.om.KeyManager;
+import org.apache.hadoop.ozone.om.KeyManagerImpl;
 import org.apache.hadoop.ozone.om.ratis.utils.OzoneManagerDoubleBufferHelper;
+import org.apache.hadoop.ozone.om.request.OMClientRequest;
+import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.KeyArgs;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Rule;
@@ -30,8 +37,10 @@ import org.junit.rules.TemporaryFolder;
 import org.mockito.Mockito;
 
 import org.apache.hadoop.hdds.client.ContainerBlockID;
+import org.apache.hadoop.hdds.client.StandaloneReplicationConfig;
 import org.apache.hadoop.hdds.conf.OzoneConfiguration;
 import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
+import org.apache.hadoop.hdds.protocol.proto.HddsProtos.ReplicationFactor;
 import org.apache.hadoop.hdds.scm.container.common.helpers.AllocatedBlock;
 import org.apache.hadoop.hdds.scm.container.common.helpers.ExcludeList;
 import org.apache.hadoop.hdds.scm.pipeline.Pipeline;
@@ -63,6 +72,7 @@ public class TestOMKeyRequest {
   public TemporaryFolder folder = new TemporaryFolder();
 
   protected OzoneManager ozoneManager;
+  protected KeyManager keyManager;
   protected OMMetrics omMetrics;
   protected OMMetadataManager omMetadataManager;
   protected AuditLogger auditLogger;
@@ -71,8 +81,8 @@ public class TestOMKeyRequest {
   protected OzoneBlockTokenSecretManager ozoneBlockTokenSecretManager;
   protected ScmBlockLocationProtocol scmBlockLocationProtocol;
 
-  protected final long containerID = 1000L;
-  protected final long localID = 100L;
+  protected static final long CONTAINER_ID = 1000L;
+  protected static final long LOCAL_ID = 100L;
 
   protected String volumeName;
   protected String bucketName;
@@ -82,6 +92,7 @@ public class TestOMKeyRequest {
   protected long clientID;
   protected long scmBlockSize = 1000L;
   protected long dataSize;
+  protected Random random;
 
   // Just setting ozoneManagerDoubleBuffer which does nothing.
   protected OzoneManagerDoubleBufferHelper ozoneManagerDoubleBufferHelper =
@@ -110,6 +121,8 @@ public class TestOMKeyRequest {
     ozoneBlockTokenSecretManager =
         Mockito.mock(OzoneBlockTokenSecretManager.class);
     scmBlockLocationProtocol = Mockito.mock(ScmBlockLocationProtocol.class);
+    keyManager = new KeyManagerImpl(ozoneManager, scmClient, ozoneConfiguration,
+        "");
     when(ozoneManager.getScmClient()).thenReturn(scmClient);
     when(ozoneManager.getBlockTokenSecretManager())
         .thenReturn(ozoneBlockTokenSecretManager);
@@ -118,18 +131,19 @@ public class TestOMKeyRequest {
     when(ozoneManager.isGrpcBlockTokenEnabled()).thenReturn(false);
     when(ozoneManager.getOMNodeId()).thenReturn(UUID.randomUUID().toString());
     when(scmClient.getBlockClient()).thenReturn(scmBlockLocationProtocol);
+    when(ozoneManager.getKeyManager()).thenReturn(keyManager);
 
     Pipeline pipeline = Pipeline.newBuilder()
         .setState(Pipeline.PipelineState.OPEN)
         .setId(PipelineID.randomId())
-        .setType(HddsProtos.ReplicationType.STAND_ALONE)
-        .setFactor(HddsProtos.ReplicationFactor.ONE)
+        .setReplicationConfig(
+            new StandaloneReplicationConfig(ReplicationFactor.ONE))
         .setNodes(new ArrayList<>())
         .build();
 
     AllocatedBlock allocatedBlock =
         new AllocatedBlock.Builder()
-            .setContainerBlockID(new ContainerBlockID(containerID, localID))
+            .setContainerBlockID(new ContainerBlockID(CONTAINER_ID, LOCAL_ID))
             .setPipeline(pipeline).build();
 
     List<AllocatedBlock> allocatedBlocks = new ArrayList<>();
@@ -149,7 +163,15 @@ public class TestOMKeyRequest {
     replicationType = HddsProtos.ReplicationType.RATIS;
     clientID = Time.now();
     dataSize = 1000L;
+    random = new Random();
 
+    Pair<String, String> volumeAndBucket = Pair.of(volumeName, bucketName);
+    when(ozoneManager.resolveBucketLink(any(KeyArgs.class),
+        any(OMClientRequest.class)))
+        .thenReturn(new ResolvedBucket(volumeAndBucket, volumeAndBucket));
+    when(ozoneManager.resolveBucketLink(any(Pair.class),
+        any(OMClientRequest.class)))
+        .thenReturn(new ResolvedBucket(volumeAndBucket, volumeAndBucket));
   }
 
   @After

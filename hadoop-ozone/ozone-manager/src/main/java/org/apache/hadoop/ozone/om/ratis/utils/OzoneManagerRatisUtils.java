@@ -18,7 +18,12 @@
 package org.apache.hadoop.ozone.om.ratis.utils;
 
 import com.google.common.base.Preconditions;
+import org.apache.hadoop.hdds.conf.OzoneConfiguration;
+import org.apache.hadoop.hdds.utils.HAUtils;
+import org.apache.hadoop.ozone.om.OzoneManager;
+import org.apache.hadoop.ozone.om.codec.OMDBDefinition;
 import org.apache.hadoop.ozone.om.exceptions.OMException;
+import org.apache.hadoop.hdds.utils.TransactionInfo;
 import org.apache.hadoop.ozone.om.request.bucket.OMBucketCreateRequest;
 import org.apache.hadoop.ozone.om.request.bucket.OMBucketDeleteRequest;
 import org.apache.hadoop.ozone.om.request.bucket.OMBucketSetPropertyRequest;
@@ -28,12 +33,14 @@ import org.apache.hadoop.ozone.om.request.bucket.acl.OMBucketRemoveAclRequest;
 import org.apache.hadoop.ozone.om.request.bucket.acl.OMBucketSetAclRequest;
 import org.apache.hadoop.ozone.om.request.file.OMDirectoryCreateRequest;
 import org.apache.hadoop.ozone.om.request.file.OMFileCreateRequest;
+import org.apache.hadoop.ozone.om.request.key.OMKeysDeleteRequest;
 import org.apache.hadoop.ozone.om.request.key.OMAllocateBlockRequest;
 import org.apache.hadoop.ozone.om.request.key.OMKeyCommitRequest;
 import org.apache.hadoop.ozone.om.request.key.OMKeyCreateRequest;
 import org.apache.hadoop.ozone.om.request.key.OMKeyDeleteRequest;
 import org.apache.hadoop.ozone.om.request.key.OMKeyPurgeRequest;
 import org.apache.hadoop.ozone.om.request.key.OMKeyRenameRequest;
+import org.apache.hadoop.ozone.om.request.key.OMKeysRenameRequest;
 import org.apache.hadoop.ozone.om.request.key.OMTrashRecoverRequest;
 import org.apache.hadoop.ozone.om.request.key.acl.OMKeyAddAclRequest;
 import org.apache.hadoop.ozone.om.request.key.acl.OMKeyRemoveAclRequest;
@@ -46,6 +53,7 @@ import org.apache.hadoop.ozone.om.request.s3.multipart.S3MultipartUploadAbortReq
 import org.apache.hadoop.ozone.om.request.s3.multipart.S3MultipartUploadCommitPartRequest;
 import org.apache.hadoop.ozone.om.request.s3.multipart.S3MultipartUploadCompleteRequest;
 import org.apache.hadoop.ozone.om.request.s3.security.S3GetSecretRequest;
+import org.apache.hadoop.ozone.om.request.s3.security.S3RevokeSecretRequest;
 import org.apache.hadoop.ozone.om.request.security.OMCancelDelegationTokenRequest;
 import org.apache.hadoop.ozone.om.request.security.OMGetDelegationTokenRequest;
 import org.apache.hadoop.ozone.om.request.security.OMRenewDelegationTokenRequest;
@@ -64,6 +72,8 @@ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.Type;
 import org.rocksdb.RocksDBException;
 
 import java.io.IOException;
+import java.nio.file.Path;
+
 
 /**
  * Utility class used by OzoneManager HA.
@@ -113,8 +123,12 @@ public final class OzoneManagerRatisUtils {
       return new OMKeyCommitRequest(omRequest);
     case DeleteKey:
       return new OMKeyDeleteRequest(omRequest);
+    case DeleteKeys:
+      return new OMKeysDeleteRequest(omRequest);
     case RenameKey:
       return new OMKeyRenameRequest(omRequest);
+    case RenameKeys:
+      return new OMKeysRenameRequest(omRequest);
     case CreateDirectory:
       return new OMDirectoryCreateRequest(omRequest);
     case CreateFile:
@@ -143,6 +157,8 @@ public final class OzoneManagerRatisUtils {
       return new S3GetSecretRequest(omRequest);
     case RecoverTrash:
       return new OMTrashRecoverRequest(omRequest);
+    case RevokeS3Secret:
+      return new S3RevokeSecretRequest(omRequest);
     default:
       throw new IllegalStateException("Unrecognized write command " +
           "type request" + cmdType);
@@ -211,5 +227,32 @@ public final class OzoneManagerRatisUtils {
         return Status.INTERNAL_ERROR;
       }
     }
+  }
+
+  /**
+   * Obtain OMTransactionInfo from Checkpoint.
+   */
+  public static TransactionInfo getTrxnInfoFromCheckpoint(
+      OzoneConfiguration conf, Path dbPath) throws Exception {
+    return HAUtils
+        .getTrxnInfoFromCheckpoint(conf, dbPath, new OMDBDefinition());
+  }
+
+  /**
+   * Verify transaction info with provided lastAppliedIndex.
+   *
+   * If transaction info transaction Index is less than or equal to
+   * lastAppliedIndex, return false, else return true.
+   * @param transactionInfo
+   * @param lastAppliedIndex
+   * @param leaderId
+   * @param newDBlocation
+   * @return boolean
+   */
+  public static boolean verifyTransactionInfo(TransactionInfo transactionInfo,
+      long lastAppliedIndex, String leaderId, Path newDBlocation) {
+    return HAUtils
+        .verifyTransactionInfo(transactionInfo, lastAppliedIndex, leaderId,
+            newDBlocation, OzoneManager.LOG);
   }
 }

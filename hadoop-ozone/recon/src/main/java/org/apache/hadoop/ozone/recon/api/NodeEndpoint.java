@@ -18,7 +18,9 @@
 
 package org.apache.hadoop.ozone.recon.api;
 
+import org.apache.hadoop.hdds.client.ReplicationConfig;
 import org.apache.hadoop.hdds.protocol.DatanodeDetails;
+import org.apache.hadoop.hdds.protocol.proto.HddsProtos.NodeOperationalState;
 import org.apache.hadoop.hdds.protocol.proto.HddsProtos.NodeState;
 import org.apache.hadoop.hdds.scm.container.placement.metrics.SCMNodeStat;
 import org.apache.hadoop.hdds.scm.node.states.NodeNotFoundException;
@@ -79,7 +81,13 @@ public class NodeEndpoint {
 
     datanodeDetails.forEach(datanode -> {
       DatanodeStorageReport storageReport = getStorageReport(datanode);
-      NodeState nodeState = nodeManager.getNodeState(datanode);
+      NodeState nodeState = null;
+      try {
+        nodeState = nodeManager.getNodeStatus(datanode).getHealth();
+      } catch (NodeNotFoundException e) {
+        LOG.warn("Cannot get nodeState for datanode {}", datanode, e);
+      }
+      final NodeOperationalState nodeOpState = datanode.getPersistedOpState();
       String hostname = datanode.getHostName();
       Set<PipelineID> pipelineIDs = nodeManager.getPipelines(datanode);
       List<DatanodePipeline> pipelines = new ArrayList<>();
@@ -91,8 +99,9 @@ public class NodeEndpoint {
           String leaderNode = pipeline.getLeaderNode().getHostName();
           DatanodePipeline datanodePipeline = new DatanodePipeline(
               pipelineID.getId(),
-              pipeline.getType().toString(),
-              pipeline.getFactor().getNumber(),
+              pipeline.getReplicationConfig().getReplicationType().toString(),
+              ReplicationConfig.getLegacyFactor(pipeline.getReplicationConfig())
+                  .getNumber(),
               leaderNode
           );
           pipelines.add(datanodePipeline);
@@ -118,9 +127,14 @@ public class NodeEndpoint {
           .withDatanodeStorageReport(storageReport)
           .withLastHeartbeat(nodeManager.getLastHeartbeat(datanode))
           .withState(nodeState)
+          .withOperationalState(nodeOpState)
           .withPipelines(pipelines)
           .withLeaderCount(leaderCount.get())
           .withUUid(datanode.getUuidString())
+          .withVersion(datanode.getVersion())
+          .withSetupTime(datanode.getSetupTime())
+          .withRevision(datanode.getRevision())
+          .withBuildDate(datanode.getBuildDate())
           .build());
     });
 

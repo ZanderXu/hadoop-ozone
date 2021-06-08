@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -31,14 +31,17 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
 
+import org.apache.hadoop.hdds.client.StandaloneReplicationConfig;
 import org.apache.hadoop.hdds.conf.OzoneConfiguration;
 import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
 import org.apache.hadoop.hdds.server.ServerUtils;
 import org.apache.hadoop.ozone.om.OmMetadataManagerImpl;
+import org.apache.hadoop.ozone.om.codec.OMDBDefinition;
 import org.apache.hadoop.ozone.om.helpers.OmBucketInfo;
 import org.apache.hadoop.ozone.om.helpers.OmKeyInfo;
 import org.apache.hadoop.ozone.om.helpers.OmVolumeArgs;
 import org.apache.hadoop.hdds.utils.db.RDBStore;
+import org.apache.hadoop.ozone.security.OzoneTokenIdentifier;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
@@ -53,6 +56,9 @@ public class TestOMDBUpdatesHandler {
 
   @Rule
   public TemporaryFolder folder = new TemporaryFolder();
+
+  private OMDBDefinition omdbDefinition = new OMDBDefinition();
+  private Random random = new Random();
 
   private OzoneConfiguration createNewTestPath() throws IOException {
     OzoneConfiguration configuration = new OzoneConfiguration();
@@ -149,6 +155,7 @@ public class TestOMDBUpdatesHandler {
 
     // Write 1 volume, 1 key into source and target OM DBs.
     String volumeKey = metaMgr.getVolumeKey("sampleVol");
+    String nonExistVolumeKey = metaMgr.getVolumeKey("nonExistingVolume");
     OmVolumeArgs args =
         OmVolumeArgs.newBuilder()
             .setVolume("sampleVol")
@@ -165,6 +172,9 @@ public class TestOMDBUpdatesHandler {
     // Delete the volume and key from target DB.
     metaMgr.getKeyTable().delete("/sampleVol/bucketOne/key_one");
     metaMgr.getVolumeTable().delete(volumeKey);
+    // Delete a non-existing volume and key
+    metaMgr.getKeyTable().delete("/sampleVol/bucketOne/key_two");
+    metaMgr.getVolumeTable().delete(metaMgr.getVolumeKey("nonExistingVolume"));
 
     RDBStore rdbStore = (RDBStore) metaMgr.getStore();
     RocksDB rocksDB = rdbStore.getDb();
@@ -191,7 +201,7 @@ public class TestOMDBUpdatesHandler {
     }
 
     List<OMDBUpdateEvent> events = omdbUpdatesHandler.getEvents();
-    assertTrue(events.size() == 2);
+    assertEquals(4, events.size());
 
     OMDBUpdateEvent keyEvent = events.get(0);
     assertEquals(OMDBUpdateEvent.OMDBUpdateAction.DELETE, keyEvent.getAction());
@@ -201,22 +211,46 @@ public class TestOMDBUpdatesHandler {
     OMDBUpdateEvent volEvent = events.get(1);
     assertEquals(OMDBUpdateEvent.OMDBUpdateAction.DELETE, volEvent.getAction());
     assertEquals(volumeKey, volEvent.getKey());
-    assertNull(volEvent.getValue());
+    assertNotNull(volEvent.getValue());
+    OmVolumeArgs volumeInfo = (OmVolumeArgs) volEvent.getValue();
+    assertEquals("sampleVol", volumeInfo.getVolume());
+
+    // Assert the values of non existent keys are set to null.
+    OMDBUpdateEvent nonExistKey = events.get(2);
+    assertEquals(OMDBUpdateEvent.OMDBUpdateAction.DELETE,
+        nonExistKey.getAction());
+    assertEquals("/sampleVol/bucketOne/key_two", nonExistKey.getKey());
+    assertNull(nonExistKey.getValue());
+
+    OMDBUpdateEvent nonExistVolume = events.get(3);
+    assertEquals(OMDBUpdateEvent.OMDBUpdateAction.DELETE,
+        nonExistVolume.getAction());
+    assertEquals(nonExistVolumeKey, nonExistVolume.getKey());
+    assertNull(nonExistVolume.getValue());
+  }
+
+  @Test
+  public void testGetKeyType() throws IOException {
+    OzoneConfiguration configuration = createNewTestPath();
+    OmMetadataManagerImpl metaMgr = new OmMetadataManagerImpl(configuration);
+
+    assertEquals(String.class, omdbDefinition.getKeyType(
+        metaMgr.getKeyTable().getName()).get());
+    assertEquals(OzoneTokenIdentifier.class, omdbDefinition.getKeyType(
+        metaMgr.getDelegationTokenTable().getName()).get());
   }
 
   @Test
   public void testGetValueType() throws IOException {
     OzoneConfiguration configuration = createNewTestPath();
     OmMetadataManagerImpl metaMgr = new OmMetadataManagerImpl(configuration);
-    OMDBUpdatesHandler omdbUpdatesHandler =
-        new OMDBUpdatesHandler(metaMgr);
 
-    assertEquals(OmKeyInfo.class, omdbUpdatesHandler.getValueType(
-        metaMgr.getKeyTable().getName()));
-    assertEquals(OmVolumeArgs.class, omdbUpdatesHandler.getValueType(
-        metaMgr.getVolumeTable().getName()));
-    assertEquals(OmBucketInfo.class, omdbUpdatesHandler.getValueType(
-        metaMgr.getBucketTable().getName()));
+    assertEquals(OmKeyInfo.class, omdbDefinition.getValueType(
+        metaMgr.getKeyTable().getName()).get());
+    assertEquals(OmVolumeArgs.class, omdbDefinition.getValueType(
+        metaMgr.getVolumeTable().getName()).get());
+    assertEquals(OmBucketInfo.class, omdbDefinition.getValueType(
+        metaMgr.getBucketTable().getName()).get());
   }
 
   private OmKeyInfo getOmKeyInfo(String volumeName, String bucketName,
@@ -225,9 +259,9 @@ public class TestOMDBUpdatesHandler {
         .setVolumeName(volumeName)
         .setBucketName(bucketName)
         .setKeyName(keyName)
-        .setReplicationFactor(HddsProtos.ReplicationFactor.ONE)
-        .setReplicationType(HddsProtos.ReplicationType.STAND_ALONE)
-        .setDataSize(new Random().nextLong())
+        .setReplicationConfig(
+            new StandaloneReplicationConfig(HddsProtos.ReplicationFactor.ONE))
+        .setDataSize(random.nextLong())
         .build();
   }
 }

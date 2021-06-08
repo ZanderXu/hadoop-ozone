@@ -20,7 +20,8 @@ package org.apache.hadoop.ozone.debug;
 
 import org.apache.hadoop.hdds.cli.GenericCli;
 import org.apache.hadoop.hdds.cli.HddsVersionProvider;
-import org.apache.hadoop.ozone.segmentparser.RatisLogParser;
+
+import org.apache.hadoop.hdds.conf.OzoneConfiguration;
 import picocli.CommandLine;
 
 /**
@@ -29,12 +30,21 @@ import picocli.CommandLine;
 @CommandLine.Command(name = "ozone debug",
         description = "Developer tools for Ozone Debug operations",
         versionProvider = HddsVersionProvider.class,
-        subcommands = {
-                ChunkKeyHandler.class,
-                RatisLogParser.class
-        },
         mixinStandardHelpOptions = true)
 public class OzoneDebug extends GenericCli {
+
+  private OzoneConfiguration ozoneConf;
+
+  public OzoneDebug() {
+    super(OzoneDebug.class);
+  }
+
+  public OzoneConfiguration getOzoneConf() {
+    if (ozoneConf == null) {
+      ozoneConf = createOzoneConfiguration();
+    }
+    return ozoneConf;
+  }
 
   /**
      * Main for the Ozone Debug shell Command handling.

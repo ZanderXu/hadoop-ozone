@@ -18,16 +18,17 @@
 package org.apache.hadoop.ozone.container.common.impl;
 
 import com.google.common.base.Preconditions;
+import org.apache.commons.lang3.ArrayUtils;
 import org.apache.hadoop.hdds.scm.container.common.helpers
     .StorageContainerException;
-import org.apache.hadoop.hdfs.DFSUtil;
 import org.apache.hadoop.ozone.container.common.interfaces
     .ContainerDeletionChoosingPolicy;
 import org.apache.hadoop.ozone.container.keyvalue.KeyValueContainerData;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.apache.hadoop.ozone.container.keyvalue.statemachine.background.BlockDeletingService.ContainerBlockInfo;
 
-import java.util.LinkedList;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -40,32 +41,41 @@ public class RandomContainerDeletionChoosingPolicy
       LoggerFactory.getLogger(RandomContainerDeletionChoosingPolicy.class);
 
   @Override
-  public List<ContainerData> chooseContainerForBlockDeletion(int count,
-      Map<Long, ContainerData> candidateContainers)
+  public List<ContainerBlockInfo> chooseContainerForBlockDeletion(
+      int blockCount, Map<Long, ContainerData> candidateContainers)
       throws StorageContainerException {
     Preconditions.checkNotNull(candidateContainers,
         "Internal assertion: candidate containers cannot be null");
 
-    int currentCount = 0;
-    List<ContainerData> result = new LinkedList<>();
+    List<ContainerBlockInfo> result = new ArrayList<>();
     ContainerData[] values = new ContainerData[candidateContainers.size()];
     // to get a shuffle list
-    for (ContainerData entry : DFSUtil.shuffle(
-        candidateContainers.values().toArray(values))) {
-      if (currentCount < count) {
-        result.add(entry);
-        currentCount++;
+    ContainerData[] shuffled = candidateContainers.values().toArray(values);
+    ArrayUtils.shuffle(shuffled);
+
+    // Here we are returning containers based on totalBlocks which is basically
+    // number of blocks to be deleted in an interval. We are also considering
+    // the boundary case where the blocks of the last container exceeds the
+    // number of blocks to be deleted in an interval, there we return that
+    // container but with container we also return an integer so that total
+    // blocks don't exceed the number of blocks to be deleted in an interval.
+
+    for (ContainerData entry : shuffled) {
+      if (((KeyValueContainerData) entry).getNumPendingDeletionBlocks() > 0) {
+        long numBlocksToDelete = Math.min(blockCount,
+            ((KeyValueContainerData) entry).getNumPendingDeletionBlocks());
+        blockCount -= numBlocksToDelete;
+        result.add(new ContainerBlockInfo(entry, numBlocksToDelete));
         if (LOG.isDebugEnabled()) {
           LOG.debug("Select container {} for block deletion, "
-                  + "pending deletion blocks num: {}.",
-              entry.getContainerID(),
+                  + "pending deletion blocks num: {}.", entry.getContainerID(),
               ((KeyValueContainerData) entry).getNumPendingDeletionBlocks());
         }
-      } else {
-        break;
+        if (blockCount == 0) {
+          break;
+        }
       }
     }
-
     return result;
   }
 }

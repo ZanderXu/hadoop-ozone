@@ -22,6 +22,7 @@ import org.apache.hadoop.hdds.protocol.proto
     .DeleteBlockTransactionResult;
 import org.apache.hadoop.hdds.protocol.proto
     .StorageContainerDatanodeProtocolProtos.DeletedBlocksTransaction;
+import org.apache.hadoop.hdds.utils.db.Table;
 
 import java.io.Closeable;
 import java.io.IOException;
@@ -41,11 +42,11 @@ public interface DeletedBlockLog extends Closeable {
    * Scan entire log once and returns TXs to DatanodeDeletedBlockTransactions.
    * Once DatanodeDeletedBlockTransactions is full, the scan behavior will
    * stop.
-   * @param transactions a list of TXs will be set into.
+   * @param blockDeletionLimit Maximum number of blocks to fetch
    * @return Mapping from containerId to latest transactionId for the container.
    * @throws IOException
    */
-  Map<Long, Long> getTransactions(DatanodeDeletedBlockTransactions transactions)
+  DatanodeDeletedBlockTransactions getTransactions(int blockDeletionLimit)
       throws IOException;
 
   /**
@@ -81,17 +82,6 @@ public interface DeletedBlockLog extends Closeable {
       UUID dnID);
 
   /**
-   * Creates a block deletion transaction and adds that into the log.
-   *
-   * @param containerID - container ID.
-   * @param blocks - blocks that belong to the same container.
-   *
-   * @throws IOException
-   */
-  void addTransaction(long containerID, List<Long> blocks)
-      throws IOException;
-
-  /**
    * Creates block deletion transactions for a set of containers,
    * add into the log and persist them atomically. An object key
    * might be stored in multiple containers and multiple blocks,
@@ -115,4 +105,10 @@ public interface DeletedBlockLog extends Closeable {
    * @throws IOException
    */
   int getNumOfValidTransactions() throws IOException;
+
+  /**
+   * Reinitialize the delete log from the db.
+   * @param deletedBlocksTXTable delete transaction table
+   */
+  void reinitialize(Table<Long, DeletedBlocksTransaction> deletedBlocksTXTable);
 }

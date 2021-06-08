@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one or more
  * contributor license agreements.  See the NOTICE file distributed with this
  * work for additional information regarding copyright ownership.  The ASF
@@ -17,12 +17,13 @@
 
 package org.apache.hadoop.ozone.om;
 
+import org.apache.hadoop.hdds.StringUtils;
 import org.apache.hadoop.hdds.cli.GenericCli;
 import org.apache.hadoop.hdds.cli.HddsVersionProvider;
 import org.apache.hadoop.hdds.conf.OzoneConfiguration;
 import org.apache.hadoop.hdds.tracing.TracingUtil;
+import org.apache.hadoop.ozone.util.OzoneVersionInfo;
 import org.apache.hadoop.security.authentication.client.AuthenticationException;
-import org.apache.hadoop.util.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import picocli.CommandLine;
@@ -107,8 +108,8 @@ public class OzoneManagerStarter extends GenericCli {
 
     String[] originalArgs = getCmd().getParseResult().originalArgs()
         .toArray(new String[0]);
-    StringUtils.startupShutdownMessage(OzoneManager.class,
-        originalArgs, LOG);
+    StringUtils.startupShutdownMessage(OzoneVersionInfo.OZONE_VERSION_INFO,
+        OzoneManager.class, originalArgs, LOG);
   }
 
   /**
@@ -118,6 +119,7 @@ public class OzoneManagerStarter extends GenericCli {
    */
   static class OMStarterHelper implements OMStarterInterface{
 
+    @Override
     public void start(OzoneConfiguration conf) throws IOException,
         AuthenticationException {
       OzoneManager om = OzoneManager.createOm(conf);
@@ -125,6 +127,7 @@ public class OzoneManagerStarter extends GenericCli {
       om.join();
     }
 
+    @Override
     public boolean init(OzoneConfiguration conf) throws IOException,
         AuthenticationException {
       return OzoneManager.omInit(conf);

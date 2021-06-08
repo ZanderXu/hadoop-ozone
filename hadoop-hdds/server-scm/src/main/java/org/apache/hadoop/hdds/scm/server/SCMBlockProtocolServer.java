@@ -29,11 +29,11 @@ import java.util.Map;
 
 import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.hdds.client.BlockID;
+import org.apache.hadoop.hdds.client.ReplicationConfig;
 import org.apache.hadoop.hdds.conf.OzoneConfiguration;
 import org.apache.hadoop.hdds.protocol.DatanodeDetails;
-import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
 import org.apache.hadoop.hdds.protocol.proto.ScmBlockLocationProtocolProtos;
-import org.apache.hadoop.hdds.utils.HddsServerUtil;
+import org.apache.hadoop.hdds.scm.AddSCMRequest;
 import org.apache.hadoop.hdds.scm.ScmInfo;
 import org.apache.hadoop.hdds.scm.container.common.helpers.AllocatedBlock;
 import org.apache.hadoop.hdds.scm.container.common.helpers.DeleteBlockResult;
@@ -62,9 +62,9 @@ import org.apache.hadoop.hdds.scm.protocol.ScmBlockLocationProtocolServerSideTra
 import com.google.common.collect.Maps;
 import com.google.protobuf.BlockingService;
 import com.google.protobuf.ProtocolMessageEnum;
-import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_BLOCK_CLIENT_ADDRESS_KEY;
 import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_HANDLER_COUNT_DEFAULT;
 import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_HANDLER_COUNT_KEY;
+import static org.apache.hadoop.hdds.scm.exceptions.SCMException.ResultCodes.IO_EXCEPTION;
 import static org.apache.hadoop.hdds.scm.server.StorageContainerManager.startRpcServer;
 import static org.apache.hadoop.hdds.server.ServerUtils.getRemoteUserName;
 import static org.apache.hadoop.hdds.server.ServerUtils.updateRPCListenAddress;
@@ -114,11 +114,11 @@ public class SCMBlockProtocolServer implements
     BlockingService blockProtoPbService =
         ScmBlockLocationProtocolProtos.ScmBlockLocationProtocolService
             .newReflectiveBlockingService(
-                new ScmBlockLocationProtocolServerSideTranslatorPB(this,
+                new ScmBlockLocationProtocolServerSideTranslatorPB(this, scm,
                     protocolMessageMetrics));
 
-    final InetSocketAddress scmBlockAddress = HddsServerUtil
-        .getScmBlockClientBindAddress(conf);
+    final InetSocketAddress scmBlockAddress =
+        scm.getScmNodeDetails().getBlockProtocolServerAddress();
     blockRpcServer =
         startRpcServer(
             conf,
@@ -128,8 +128,8 @@ public class SCMBlockProtocolServer implements
             handlerCount);
     blockRpcAddress =
         updateRPCListenAddress(
-            conf, OZONE_SCM_BLOCK_CLIENT_ADDRESS_KEY, scmBlockAddress,
-            blockRpcServer);
+            conf, scm.getScmNodeDetails().getBlockProtocolServerAddressKey(),
+            scmBlockAddress, blockRpcServer);
     if (conf.getBoolean(CommonConfigurationKeys.HADOOP_SECURITY_AUTHORIZATION,
         false)) {
       blockRpcServer.refreshServiceAcl(conf, SCMPolicyProvider.getInstance());
@@ -169,13 +169,15 @@ public class SCMBlockProtocolServer implements
   }
 
   @Override
-  public List<AllocatedBlock> allocateBlock(long size, int num,
-      HddsProtos.ReplicationType type, HddsProtos.ReplicationFactor factor,
-      String owner, ExcludeList excludeList) throws IOException {
+  public List<AllocatedBlock> allocateBlock(
+      long size, int num,
+      ReplicationConfig replicationConfig,
+      String owner, ExcludeList excludeList
+  ) throws IOException {
     Map<String, String> auditMap = Maps.newHashMap();
     auditMap.put("size", String.valueOf(size));
-    auditMap.put("type", type.name());
-    auditMap.put("factor", factor.name());
+    auditMap.put("num", String.valueOf(num));
+    auditMap.put("replication", replicationConfig.toString());
     auditMap.put("owner", owner);
     List<AllocatedBlock> blocks = new ArrayList<>(num);
     boolean auditSuccess = true;
@@ -187,7 +189,7 @@ public class SCMBlockProtocolServer implements
     try {
       for (int i = 0; i < num; i++) {
         AllocatedBlock block = scm.getScmBlockManager()
-            .allocateBlock(size, type, factor, owner, excludeList);
+            .allocateBlock(size, replicationConfig, owner, excludeList);
         if (block != null) {
           blocks.add(block);
         }
@@ -217,58 +219,52 @@ public class SCMBlockProtocolServer implements
   @Override
   public List<DeleteBlockGroupResult> deleteKeyBlocks(
       List<BlockGroup> keyBlocksInfoList) throws IOException {
-    LOG.info("SCM is informed by OM to delete {} blocks", keyBlocksInfoList
-        .size());
+    if (LOG.isDebugEnabled()) {
+      LOG.debug("SCM is informed by OM to delete {} blocks",
+          keyBlocksInfoList.size());
+    }
     List<DeleteBlockGroupResult> results = new ArrayList<>();
     Map<String, String> auditMap = Maps.newHashMap();
-    for (BlockGroup keyBlocks : keyBlocksInfoList) {
-      ScmBlockLocationProtocolProtos.DeleteScmBlockResult.Result resultCode;
-      try {
-        // We delete blocks in an atomic operation to prevent getting
-        // into state like only a partial of blocks are deleted,
-        // which will leave key in an inconsistent state.
-        auditMap.put("keyBlockToDelete", keyBlocks.toString());
-        scm.getScmBlockManager().deleteBlocks(keyBlocks.getBlockIDList());
-        resultCode = ScmBlockLocationProtocolProtos.DeleteScmBlockResult
-            .Result.success;
-        AUDIT.logWriteSuccess(
-            buildAuditMessageForSuccess(SCMAction.DELETE_KEY_BLOCK, auditMap)
-        );
-      } catch (SCMException scmEx) {
-        LOG.warn("Fail to delete block: {}", keyBlocks.getGroupID(), scmEx);
-        AUDIT.logWriteFailure(
-            buildAuditMessageForFailure(SCMAction.DELETE_KEY_BLOCK, auditMap,
-                scmEx)
-        );
-        switch (scmEx.getResult()) {
-        case SAFE_MODE_EXCEPTION:
-          resultCode = ScmBlockLocationProtocolProtos.DeleteScmBlockResult
-              .Result.safeMode;
-          break;
-        case FAILED_TO_FIND_BLOCK:
-          resultCode = ScmBlockLocationProtocolProtos.DeleteScmBlockResult
-              .Result.errorNotFound;
-          break;
-        default:
-          resultCode = ScmBlockLocationProtocolProtos.DeleteScmBlockResult
-              .Result.unknownFailure;
-        }
-      } catch (IOException ex) {
-        LOG.warn("Fail to delete blocks for object key: {}", keyBlocks
-            .getGroupID(), ex);
-        AUDIT.logWriteFailure(
-            buildAuditMessageForFailure(SCMAction.DELETE_KEY_BLOCK, auditMap,
-                ex)
-        );
-        resultCode = ScmBlockLocationProtocolProtos.DeleteScmBlockResult
-            .Result.unknownFailure;
+    ScmBlockLocationProtocolProtos.DeleteScmBlockResult.Result resultCode;
+    Exception e = null;
+    try {
+      scm.getScmBlockManager().deleteBlocks(keyBlocksInfoList);
+      resultCode = ScmBlockLocationProtocolProtos.
+          DeleteScmBlockResult.Result.success;
+    } catch (IOException ioe) {
+      e = ioe;
+      LOG.warn("Fail to delete {} keys", keyBlocksInfoList.size(), ioe);
+      switch (ioe instanceof SCMException ? ((SCMException) ioe).getResult() :
+          IO_EXCEPTION) {
+      case SAFE_MODE_EXCEPTION:
+        resultCode =
+            ScmBlockLocationProtocolProtos.DeleteScmBlockResult.Result.safeMode;
+        break;
+      case FAILED_TO_FIND_BLOCK:
+        resultCode =
+            ScmBlockLocationProtocolProtos.DeleteScmBlockResult.Result.
+                errorNotFound;
+        break;
+      default:
+        resultCode =
+            ScmBlockLocationProtocolProtos.DeleteScmBlockResult.Result.
+                unknownFailure;
       }
-      List<DeleteBlockResult> blockResultList = new ArrayList<>();
-      for (BlockID blockKey : keyBlocks.getBlockIDList()) {
-        blockResultList.add(new DeleteBlockResult(blockKey, resultCode));
+    }
+    for (BlockGroup bg : keyBlocksInfoList) {
+      auditMap.put("KeyBlockToDelete", bg.toString());
+      List<DeleteBlockResult> blockResult = new ArrayList<>();
+      for (BlockID b : bg.getBlockIDList()) {
+        blockResult.add(new DeleteBlockResult(b, resultCode));
       }
-      results.add(new DeleteBlockGroupResult(keyBlocks.getGroupID(),
-          blockResultList));
+      results.add(new DeleteBlockGroupResult(bg.getGroupID(), blockResult));
+    }
+    if (e == null) {
+      AUDIT.logWriteSuccess(
+          buildAuditMessageForSuccess(SCMAction.DELETE_KEY_BLOCK, auditMap));
+    } else {
+      AUDIT.logWriteFailure(
+          buildAuditMessageForFailure(SCMAction.DELETE_KEY_BLOCK, auditMap, e));
     }
     return results;
   }
@@ -292,6 +288,33 @@ public class SCMBlockProtocolServer implements
       if(auditSuccess) {
         AUDIT.logReadSuccess(
             buildAuditMessageForSuccess(SCMAction.GET_SCM_INFO, null)
+        );
+      }
+    }
+  }
+
+  @Override
+  public boolean addSCM(AddSCMRequest request) throws IOException {
+    LOG.debug("Adding SCM {} addr {} cluster id {}",
+        request.getScmId(), request.getRatisAddr(), request.getClusterId());
+
+    Map<String, String> auditMap = Maps.newHashMap();
+    auditMap.put("scmId", String.valueOf(request.getScmId()));
+    auditMap.put("cluster", String.valueOf(request.getClusterId()));
+    auditMap.put("addr", String.valueOf(request.getRatisAddr()));
+    boolean auditSuccess = true;
+    try{
+      return scm.getScmHAManager().addSCM(request);
+    } catch (Exception ex) {
+      auditSuccess = false;
+      AUDIT.logReadFailure(
+          buildAuditMessageForFailure(SCMAction.ADD_SCM, auditMap, ex)
+      );
+      throw ex;
+    } finally {
+      if(auditSuccess) {
+        AUDIT.logReadSuccess(
+            buildAuditMessageForSuccess(SCMAction.ADD_SCM, auditMap)
         );
       }
     }

@@ -26,6 +26,8 @@ services:
     env_file:
       - docker-config
       - ../common-config
+    environment:
+      OZONE_OPTS:
   om:
     image: apache/ozone-runner:${OZONE_RUNNER_VERSION}
     hostname: om
@@ -37,6 +39,7 @@ services:
     environment:
       WAITFOR: scm:9876
       ENSURE_OM_INITIALIZED: /data/metadata/om/current/VERSION
+      OZONE_OPTS:
     env_file:
       - docker-config
       - ../common-config
@@ -51,6 +54,8 @@ services:
     env_file:
       - ./docker-config
       - ../common-config
+    environment:
+      OZONE_OPTS:
     command: ["/opt/hadoop/bin/ozone","s3g"]
   scm:
     image: apache/ozone-runner:${OZONE_RUNNER_VERSION}
@@ -59,35 +64,36 @@ services:
       - ../../..:/opt/hadoop
     ports:
       - 9876:9876
+      - 9860:9860
     env_file:
       - docker-config
       - ../common-config
     environment:
       ENSURE_SCM_INITIALIZED: /data/metadata/scm/current/VERSION
       OZONE-SITE.XML_hdds.scm.safemode.min.datanode: "${OZONE_SAFEMODE_MIN_DATANODES:-1}"
+      OZONE_OPTS:
     command: ["/opt/hadoop/bin/ozone","scm"]
   rm:
     image: ${HADOOP_IMAGE}:${HADOOP_VERSION}
     hostname: rm
     volumes:
       - ../../..:/opt/ozone
+      - ../../../libexec/transformation.py:/opt/transformation.py
     ports:
       - 8088:8088
     env_file:
       - ./docker-config
       - ../common-config
-    environment:
-      HADOOP_CLASSPATH: /opt/ozone/share/ozone/lib/hadoop-ozone-filesystem-lib-current-@project.version@.jar
     command: ["yarn", "resourcemanager"]
   nm:
     image: ${HADOOP_IMAGE}:${HADOOP_VERSION}
     hostname: nm
     volumes:
       - ../../..:/opt/ozone
+      - ../../../libexec/transformation.py:/opt/transformation.py
     env_file:
       - ./docker-config
       - ../common-config
     environment:
-      HADOOP_CLASSPATH: /opt/ozone/share/ozone/lib/hadoop-ozone-filesystem-lib-current-@project.version@.jar
-      WAIT_FOR: rm:8088
+      WAITFOR: rm:8088
     command: ["yarn","nodemanager"]

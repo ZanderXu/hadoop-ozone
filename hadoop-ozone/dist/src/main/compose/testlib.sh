@@ -16,45 +16,80 @@
 # limitations under the License.
 set -e
 
+_testlib_this="${BASH_SOURCE[0]}"
+_testlib_dir="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
+
 COMPOSE_ENV_NAME=$(basename "$COMPOSE_DIR")
-COMPOSE_FILE=$COMPOSE_DIR/docker-compose.yaml
 RESULT_DIR=${RESULT_DIR:-"$COMPOSE_DIR/result"}
 RESULT_DIR_INSIDE="/tmp/smoketest/$(basename "$COMPOSE_ENV_NAME")/result"
-SMOKETEST_DIR_INSIDE="${OZONE_DIR:-/opt/hadoop}/smoketest"
 
 OM_HA_PARAM=""
-if [[ -n "${OM_SERVICE_ID}" ]]; then
+if [[ -n "${OM_SERVICE_ID}" ]] && [[ "${OM_SERVICE_ID}" != "om" ]]; then
   OM_HA_PARAM="--om-service-id=${OM_SERVICE_ID}"
 fi
+
+: ${SCM:=scm}
 
 ## @description create results directory, purging any prior data
 create_results_dir() {
   #delete previous results
-  rm -rf "$RESULT_DIR"
+  [[ "${OZONE_KEEP_RESULTS:-}" == "true" ]] || rm -rf "$RESULT_DIR"
   mkdir -p "$RESULT_DIR"
   #Should be writeable from the docker containers where user is different.
   chmod ogu+w "$RESULT_DIR"
 }
 
+## @description find all the test.sh scripts in the immediate child dirs
+all_tests_in_immediate_child_dirs() {
+  find . -mindepth 2 -maxdepth 2 -name test.sh | cut -c3- | sort
+}
 
-## @description wait until safemode exit (or 180 seconds)
-## @param the docker-compose file
+## @description Find all test.sh scripts in immediate child dirs,
+## @description applying OZONE_ACCEPTANCE_SUITE or OZONE_TEST_SELECTOR filter.
+find_tests(){
+  if [[ -n "${OZONE_ACCEPTANCE_SUITE}" ]]; then
+     tests=$(all_tests_in_immediate_child_dirs | xargs grep -l "^#suite:${OZONE_ACCEPTANCE_SUITE}$")
+
+     # 'misc' is default suite, add untagged tests, too
+    if [[ "misc" == "${OZONE_ACCEPTANCE_SUITE}" ]]; then
+       untagged="$(all_tests_in_immediate_child_dirs | xargs grep -L "^#suite:")"
+       if [[ -n "${untagged}" ]]; then
+         tests=$(echo ${tests} ${untagged} | xargs -n1 | sort)
+       fi
+     fi
+
+    if [[ -z "${tests}" ]]; then
+       echo "No tests found for suite ${OZONE_ACCEPTANCE_SUITE}"
+       exit 1
+    fi
+  elif [[ -n "${OZONE_TEST_SELECTOR}" ]]; then
+    tests=$(all_tests_in_immediate_child_dirs | grep "${OZONE_TEST_SELECTOR}")
+  else
+    tests=$(all_tests_in_immediate_child_dirs | xargs grep -L '^#suite:failing')
+  fi
+  echo $tests
+}
+
+## @description wait until safemode exit (or 240 seconds)
 wait_for_safemode_exit(){
-  local compose_file=$1
+  # version-dependent
+  : ${OZONE_SAFEMODE_STATUS_COMMAND:=ozone admin safemode status --verbose}
 
   #Reset the timer
   SECONDS=0
 
-  #Don't give it up until 180 seconds
-  while [[ $SECONDS -lt 180 ]]; do
+  #Don't give it up until 240 seconds
+  while [[ $SECONDS -lt 240 ]]; do
 
      #This line checks the safemode status in scm
-     local command="ozone admin safemode status"
+     local command="${OZONE_SAFEMODE_STATUS_COMMAND}"
      if [[ "${SECURITY_ENABLED}" == 'true' ]]; then
-         status=$(docker-compose -f "${compose_file}" exec -T scm bash -c "kinit -k HTTP/scm@EXAMPLE.COM -t /etc/security/keytabs/HTTP.keytab && $command" || true)
+         status=$(docker-compose exec -T ${SCM} bash -c "kinit -k HTTP/scm@EXAMPLE.COM -t /etc/security/keytabs/HTTP.keytab && $command" || true)
      else
-         status=$(docker-compose -f "${compose_file}" exec -T scm bash -c "$command")
+         status=$(docker-compose exec -T ${SCM} bash -c "$command")
      fi
+
+     echo "SECONDS: $SECONDS"
 
      echo $status
      if [[ "$status" ]]; then
@@ -71,6 +106,39 @@ wait_for_safemode_exit(){
    return 1
 }
 
+## @description wait until OM leader is elected (or 120 seconds)
+wait_for_om_leader() {
+  if [[ -z "${OM_SERVICE_ID:-}" ]]; then
+    echo "No OM HA service, no need to wait"
+    return
+  fi
+
+  #Reset the timer
+  SECONDS=0
+
+  #Don't give it up until 120 seconds
+  while [[ $SECONDS -lt 120 ]]; do
+    local command="ozone admin om roles --service-id '${OM_SERVICE_ID}'"
+    if [[ "${SECURITY_ENABLED}" == 'true' ]]; then
+      status=$(docker-compose exec -T ${SCM} bash -c "kinit -k scm/scm@EXAMPLE.COM -t /etc/security/keytabs/scm.keytab && $command" | grep LEADER)
+    else
+      status=$(docker-compose exec -T ${SCM} bash -c "$command" | grep LEADER)
+    fi
+    if [[ -n "${status}" ]]; then
+      echo "Found OM leader for service ${OM_SERVICE_ID}: $status"
+      return
+    else
+      echo "Waiting for OM leader for service ${OM_SERVICE_ID}"
+    fi
+
+    echo "SECONDS: $SECONDS"
+
+    sleep 2
+  done
+  echo "WARNING: OM leader still not found for service ${OM_SERVICE_ID}"
+  return 1
+}
+
 ## @description  Starts a docker-compose based test environment
 ## @param number of datanodes to start and wait for (default: 3)
 start_docker_env(){
@@ -78,9 +146,11 @@ start_docker_env(){
 
   create_results_dir
   export OZONE_SAFEMODE_MIN_DATANODES="${datanode_count}"
-  docker-compose -f "$COMPOSE_FILE" --no-ansi down
-  if ! { docker-compose -f "$COMPOSE_FILE" --no-ansi up -d --scale datanode="${datanode_count}" \
-      && wait_for_safemode_exit "$COMPOSE_FILE"; }; then
+
+  docker-compose --no-ansi down
+  if ! { docker-compose --no-ansi up -d --scale datanode="${datanode_count}" \
+      && wait_for_safemode_exit \
+      && wait_for_om_leader ; }; then
     OUTPUT_NAME="$COMPOSE_ENV_NAME"
     stop_docker_env
     return 1
@@ -101,13 +171,32 @@ execute_robot_test(){
   TEST_NAME="$(basename "$COMPOSE_DIR")-${TEST_NAME%.*}"
   set +e
   OUTPUT_NAME="$COMPOSE_ENV_NAME-$TEST_NAME-$CONTAINER"
-  OUTPUT_PATH="$RESULT_DIR_INSIDE/robot-$OUTPUT_NAME.xml"
+
+  # find unique filename
+  declare -i i=0
+  OUTPUT_FILE="robot-${OUTPUT_NAME}.xml"
+  while [[ -f $RESULT_DIR/$OUTPUT_FILE ]]; do
+    let i++
+    OUTPUT_FILE="robot-${OUTPUT_NAME}-${i}.xml"
+  done
+
+  SMOKETEST_DIR_INSIDE="${OZONE_DIR:-/opt/hadoop}/smoketest"
+
+  OUTPUT_PATH="$RESULT_DIR_INSIDE/${OUTPUT_FILE}"
   # shellcheck disable=SC2068
-  docker-compose -f "$COMPOSE_FILE" exec -T "$CONTAINER" mkdir -p "$RESULT_DIR_INSIDE" \
-    && docker-compose -f "$COMPOSE_FILE" exec -T -e SECURITY_ENABLED="${SECURITY_ENABLED}" -e OM_HA_PARAM="${OM_HA_PARAM}" -e OM_SERVICE_ID="${OM_SERVICE_ID}" "$CONTAINER" robot ${ARGUMENTS[@]} --log NONE -N "$TEST_NAME" --report NONE "${OZONE_ROBOT_OPTS[@]}" --output "$OUTPUT_PATH" "$SMOKETEST_DIR_INSIDE/$TEST"
+  docker-compose exec -T "$CONTAINER" mkdir -p "$RESULT_DIR_INSIDE" \
+    && docker-compose exec -T "$CONTAINER" robot \
+      -v KEY_NAME:"${OZONE_BUCKET_KEY_NAME}" \
+      -v OM_HA_PARAM:"${OM_HA_PARAM}" \
+      -v OM_SERVICE_ID:"${OM_SERVICE_ID:-om}" \
+      -v OZONE_DIR:"${OZONE_DIR}" \
+      -v SECURITY_ENABLED:"${SECURITY_ENABLED}" \
+      -v SCM:"${SCM}" \
+      ${ARGUMENTS[@]} --log NONE --report NONE "${OZONE_ROBOT_OPTS[@]}" --output "$OUTPUT_PATH" \
+      "$SMOKETEST_DIR_INSIDE/$TEST"
   local -i rc=$?
 
-  FULL_CONTAINER_NAME=$(docker-compose -f "$COMPOSE_FILE" ps | grep "_${CONTAINER}_" | head -n 1 | awk '{print $1}')
+  FULL_CONTAINER_NAME=$(docker-compose ps | grep "_${CONTAINER}_" | head -n 1 | awk '{print $1}')
   docker cp "$FULL_CONTAINER_NAME:$OUTPUT_PATH" "$RESULT_DIR/"
 
   copy_daemon_logs
@@ -124,7 +213,7 @@ execute_robot_test(){
 ## @description Copy any 'out' files for daemon processes to the result dir
 copy_daemon_logs() {
   local c f
-  for c in $(docker-compose -f "$COMPOSE_FILE" ps | grep "^${COMPOSE_ENV_NAME}_" | awk '{print $1}'); do
+  for c in $(docker-compose ps | grep "^${COMPOSE_ENV_NAME}_" | awk '{print $1}'); do
     for f in $(docker exec "${c}" ls -1 /var/log/hadoop | grep -F '.out'); do
       docker cp "${c}:/var/log/hadoop/${f}" "$RESULT_DIR/"
     done
@@ -138,7 +227,7 @@ copy_daemon_logs() {
 execute_command_in_container(){
   set -e
   # shellcheck disable=SC2068
-  docker-compose -f "$COMPOSE_FILE" exec -T "$@"
+  docker-compose exec -T "$@"
   set +e
 }
 
@@ -146,7 +235,7 @@ execute_command_in_container(){
 ## @param       List of container names, eg datanode_1 datanode_2
 stop_containers() {
   set -e
-  docker-compose -f "$COMPOSE_FILE" --no-ansi stop $@
+  docker-compose --no-ansi stop $@
   set +e
 }
 
@@ -155,7 +244,7 @@ stop_containers() {
 ## @param       List of container names, eg datanode_1 datanode_2
 start_containers() {
   set -e
-  docker-compose -f "$COMPOSE_FILE" --no-ansi start $@
+  docker-compose --no-ansi start $@
   set +e
 }
 
@@ -174,7 +263,7 @@ wait_for_port(){
 
   while [[ $SECONDS -lt $timeout ]]; do
      set +e
-     docker-compose -f "${COMPOSE_FILE}" exec -T scm /bin/bash -c "nc -z $host $port"
+     docker-compose exec -T ${SCM} /bin/bash -c "nc -z $host $port"
      status=$?
      set -e
      if [ $status -eq 0 ] ; then
@@ -191,9 +280,9 @@ wait_for_port(){
 
 ## @description  Stops a docker-compose based test environment (with saving the logs)
 stop_docker_env(){
-  docker-compose -f "$COMPOSE_FILE" --no-ansi logs > "$RESULT_DIR/docker-$OUTPUT_NAME.log"
+  docker-compose --no-ansi logs > "$RESULT_DIR/docker-$OUTPUT_NAME.log"
   if [ "${KEEP_RUNNING:-false}" = false ]; then
-     docker-compose -f "$COMPOSE_FILE" --no-ansi down
+     docker-compose --no-ansi down
   fi
 }
 
@@ -206,12 +295,130 @@ cleanup_docker_images() {
 
 ## @description  Generate robot framework reports based on the saved results.
 generate_report(){
+  local title="${1:-${COMPOSE_ENV_NAME}}"
+  local dir="${2:-${RESULT_DIR}}"
 
   if command -v rebot > /dev/null 2>&1; then
      #Generate the combined output and return with the right exit code (note: robot = execute test, rebot = generate output)
-     rebot -d "$RESULT_DIR" "$RESULT_DIR/robot-*.xml"
+     rebot --reporttitle "${title}" -N "${title}" -d "${dir}" "${dir}/*.xml"
   else
-     echo "Robot framework is not installed, the reports can be generated (sudo pip install robotframework)."
+     echo "Robot framework is not installed, the reports cannot be generated (sudo pip install robotframework)."
      exit 1
   fi
+}
+
+## @description  Copy results of a single test environment to the "all tests" dir.
+copy_results() {
+  local test_dir="$1"
+  local all_result_dir="$2"
+
+  local result_dir="${test_dir}/result"
+  local test_dir_name=$(basename ${test_dir})
+  if [[ -n "$(find "${result_dir}" -name "*.xml")" ]]; then
+    rebot --nostatusrc -N "${test_dir_name}" -l NONE -r NONE -o "${all_result_dir}/${test_dir_name}.xml" "${result_dir}/*.xml"
+  fi
+
+  cp "${result_dir}"/docker-*.log "${all_result_dir}"/
+  if [[ -n "$(find "${result_dir}" -name "*.out")" ]]; then
+    cp "${result_dir}"/*.out* "${all_result_dir}"/
+  fi
+}
+
+run_test_script() {
+  local d="$1"
+
+  echo "Executing test in ${d}"
+
+  #required to read the .env file from the right location
+  cd "${d}" || return
+
+  local ret=0
+  if ! ./test.sh; then
+    ret=1
+    echo "ERROR: Test execution of ${d} is FAILED!!!!"
+  fi
+
+  cd - > /dev/null
+
+  return ${ret}
+}
+
+run_test_scripts() {
+  local ret=0
+
+  for t in "$@"; do
+    d="$(dirname "${t}")"
+
+    if ! run_test_script "${d}"; then
+      ret=1
+    fi
+
+    copy_results "${d}" "${ALL_RESULT_DIR}"
+
+    if [[ "${ret}" == "1" ]] && [[ "${FAIL_FAST:-}" == "true" ]]; then
+      break
+    fi
+  done
+
+  return ${ret}
+}
+
+## @description Make `OZONE_VOLUME_OWNER` the owner of the `OZONE_VOLUME`
+##   directory tree (required in Github Actions runner environment)
+fix_data_dir_permissions() {
+  if [[ -n "${OZONE_VOLUME}" ]] && [[ -n "${OZONE_VOLUME_OWNER}" ]]; then
+    current_user=$(whoami)
+    if [[ "${OZONE_VOLUME_OWNER}" != "${current_user}" ]]; then
+      chown -R "${OZONE_VOLUME_OWNER}" "${OZONE_VOLUME}" \
+        || sudo chown -R "${OZONE_VOLUME_OWNER}" "${OZONE_VOLUME}"
+    fi
+  fi
+}
+
+## @description Define variables required for using Ozone docker image which
+##   includes binaries for a specific release
+## @param `ozone` image version
+prepare_for_binary_image() {
+  local v=$1
+
+  export OZONE_DIR=/opt/ozone
+  export OZONE_IMAGE="apache/ozone:${v}"
+}
+
+## @description Define variables required for using `ozone-runner` docker image
+##   (no binaries included)
+## @param `ozone-runner` image version (optional)
+prepare_for_runner_image() {
+  local default_version=${docker.ozone-runner.version} # set at build-time from Maven property
+  local runner_version=${OZONE_RUNNER_VERSION:-${default_version}} # may be specified by user running the test
+  local v=${1:-${runner_version}} # prefer explicit argument
+
+  export OZONE_DIR=/opt/hadoop
+  export OZONE_IMAGE="apache/ozone-runner:${v}"
+}
+
+## @description Print the logical version for a specific release
+## @param the release for which logical version should be printed
+get_logical_version() {
+  local v="$1"
+
+  # shellcheck source=/dev/null
+  echo $(source "${_testlib_dir}/versions/${v}.sh" && ozone_logical_version)
+}
+
+## @description Activate the version-specific behavior for a given release
+## @param the release for which definitions should be loaded
+load_version_specifics() {
+  local v="$1"
+
+  # shellcheck source=/dev/null
+  source "${_testlib_dir}/versions/${v}.sh"
+
+  ozone_version_load
+}
+
+## @description Deactivate the previously version-specific behavior,
+##   reverting to the current version's definitions
+unload_version_specifics() {
+  ozone_version_unload
 }

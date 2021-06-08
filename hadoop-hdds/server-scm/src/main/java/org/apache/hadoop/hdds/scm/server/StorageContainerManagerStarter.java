@@ -21,12 +21,14 @@
  */
 package org.apache.hadoop.hdds.scm.server;
 
+import org.apache.hadoop.hdds.StringUtils;
 import org.apache.hadoop.hdds.cli.GenericCli;
 import org.apache.hadoop.hdds.cli.HddsVersionProvider;
 import org.apache.hadoop.hdds.conf.OzoneConfiguration;
 import org.apache.hadoop.hdds.tracing.TracingUtil;
+import org.apache.hadoop.hdds.utils.HddsVersionInfo;
 import org.apache.hadoop.ozone.common.StorageInfo;
-import org.apache.hadoop.util.StringUtils;
+import org.apache.hadoop.security.authentication.client.AuthenticationException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import picocli.CommandLine;
@@ -112,6 +114,25 @@ public class StorageContainerManagerStarter extends GenericCli {
   }
 
   /**
+   * This function implements a sub-command to allow the SCM to be
+   * initialized from the command line.
+   */
+  @CommandLine.Command(name = "--bootstrap",
+      customSynopsis = "ozone scm [global options] --bootstrap",
+      hidden = false,
+      description = "Bootstrap SCM if not already done",
+      mixinStandardHelpOptions = true,
+      versionProvider = HddsVersionProvider.class)
+  public void bootStrapScm()
+      throws Exception {
+    commonInit();
+    boolean result = receiver.bootStrap(conf);
+    if (!result) {
+      throw new IOException("scm bootstrap failed");
+    }
+  }
+
+  /**
    * This function is used by the command line to start the SCM.
    */
   private void startScm() throws Exception {
@@ -128,8 +149,8 @@ public class StorageContainerManagerStarter extends GenericCli {
 
     String[] originalArgs = getCmd().getParseResult().originalArgs()
         .toArray(new String[0]);
-    StringUtils.startupShutdownMessage(StorageContainerManager.class,
-        originalArgs, LOG);
+    StringUtils.startupShutdownMessage(HddsVersionInfo.HDDS_VERSION_INFO,
+        StorageContainerManager.class, originalArgs, LOG);
   }
 
   /**
@@ -139,17 +160,26 @@ public class StorageContainerManagerStarter extends GenericCli {
    */
   static class SCMStarterHelper implements SCMStarterInterface {
 
+    @Override
     public void start(OzoneConfiguration conf) throws Exception {
       StorageContainerManager stm = StorageContainerManager.createSCM(conf);
       stm.start();
       stm.join();
     }
 
+    @Override
     public boolean init(OzoneConfiguration conf, String clusterId)
         throws IOException{
       return StorageContainerManager.scmInit(conf, clusterId);
     }
 
+    @Override
+    public boolean bootStrap(OzoneConfiguration conf)
+        throws AuthenticationException, IOException {
+      return StorageContainerManager.scmBootstrap(conf);
+    }
+
+    @Override
     public String generateClusterId() {
       return StorageInfo.newClusterID();
     }

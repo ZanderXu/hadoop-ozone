@@ -23,6 +23,9 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.UUID;
 
+import org.apache.hadoop.hdds.client.RatisReplicationConfig;
+import org.apache.hadoop.ozone.om.helpers.OmBucketInfo;
+import org.junit.After;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.rules.TemporaryFolder;
@@ -69,6 +72,14 @@ public class TestS3MultipartResponse {
     batchOperation = omMetadataManager.getStore().initBatchOperation();
   }
 
+  @After
+  public void tearDown() {
+    if (batchOperation != null) {
+      batchOperation.close();
+    }
+  }
+
+
 
   public S3InitiateMultipartUploadResponse createS3InitiateMPUResponse(
       String volumeName, String bucketName, String keyName,
@@ -76,8 +87,8 @@ public class TestS3MultipartResponse {
     OmMultipartKeyInfo multipartKeyInfo = new OmMultipartKeyInfo.Builder()
         .setUploadID(multipartUploadID)
         .setCreationTime(Time.now())
-        .setReplicationType(HddsProtos.ReplicationType.RATIS)
-        .setReplicationFactor(HddsProtos.ReplicationFactor.ONE)
+        .setReplicationConfig(new RatisReplicationConfig(
+            HddsProtos.ReplicationFactor.ONE))
         .build();
 
     OmKeyInfo omKeyInfo = new OmKeyInfo.Builder()
@@ -86,8 +97,8 @@ public class TestS3MultipartResponse {
         .setKeyName(keyName)
         .setCreationTime(Time.now())
         .setModificationTime(Time.now())
-        .setReplicationType(HddsProtos.ReplicationType.RATIS)
-        .setReplicationFactor(HddsProtos.ReplicationFactor.ONE)
+        .setReplicationConfig(new RatisReplicationConfig(
+            HddsProtos.ReplicationFactor.ONE))
         .setOmKeyLocationInfos(Collections.singletonList(
             new OmKeyLocationInfoGroup(0, new ArrayList<>())))
         .build();
@@ -107,8 +118,8 @@ public class TestS3MultipartResponse {
   }
 
   public S3MultipartUploadAbortResponse createS3AbortMPUResponse(
-      String multipartKey, long timeStamp,
-      OmMultipartKeyInfo omMultipartKeyInfo) {
+      String multipartKey, OmMultipartKeyInfo omMultipartKeyInfo,
+      OmBucketInfo omBucketInfo) {
     OMResponse omResponse = OMResponse.newBuilder()
         .setCmdType(OzoneManagerProtocolProtos.Type.AbortMultiPartUpload)
         .setStatus(OzoneManagerProtocolProtos.Status.OK)
@@ -117,7 +128,7 @@ public class TestS3MultipartResponse {
             MultipartUploadAbortResponse.newBuilder().build()).build();
 
     return new S3MultipartUploadAbortResponse(omResponse, multipartKey,
-        omMultipartKeyInfo, true);
+        omMultipartKeyInfo, true, omBucketInfo);
   }
 
 

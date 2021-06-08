@@ -35,14 +35,13 @@ import org.apache.hadoop.hdds.scm.server.StorageContainerManager;
 import org.apache.hadoop.hdds.server.events.EventQueue;
 import org.apache.hadoop.ozone.HddsDatanodeService;
 import org.apache.hadoop.ozone.MiniOzoneCluster;
-import org.apache.hadoop.ozone.OzoneConfigKeys;
 import org.apache.hadoop.ozone.TestStorageContainerManagerHelper;
 import org.apache.hadoop.ozone.client.ObjectStore;
 import org.apache.hadoop.ozone.client.OzoneBucket;
 import org.apache.hadoop.ozone.client.OzoneVolume;
 import org.apache.hadoop.ozone.om.helpers.OmKeyInfo;
-import org.apache.hadoop.test.GenericTestUtils;
-import org.apache.hadoop.test.LambdaTestUtils;
+import org.apache.ozone.test.GenericTestUtils;
+import org.apache.ozone.test.LambdaTestUtils;
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
@@ -72,18 +71,18 @@ import static org.junit.Assert.fail;
 @Ignore
 public class TestScmSafeMode {
 
-  private final static Logger LOG = LoggerFactory
+  private static final Logger LOG = LoggerFactory
       .getLogger(TestScmSafeMode.class);
-  private static MiniOzoneCluster cluster = null;
-  private static MiniOzoneCluster.Builder builder = null;
-  private static OzoneConfiguration conf;
-  private static OzoneManager om;
-  private static StorageContainerLocationProtocolClientSideTranslatorPB
+  private MiniOzoneCluster cluster = null;
+  private MiniOzoneCluster.Builder builder = null;
+  private OzoneConfiguration conf;
+  private OzoneManager om;
+  private StorageContainerLocationProtocolClientSideTranslatorPB
       storageContainerLocationClient;
 
 
   @Rule
-  public Timeout timeout = new Timeout(1000 * 200);
+  public Timeout timeout = Timeout.seconds(200);
 
   /**
    * Create a MiniDFSCluster for testing.
@@ -289,8 +288,6 @@ public class TestScmSafeMode {
 
   @Test(timeout = 300_000)
   public void testSCMSafeModeRestrictedOp() throws Exception {
-    conf.set(OzoneConfigKeys.OZONE_METADATA_STORE_IMPL,
-        OzoneConfigKeys.OZONE_METADATA_STORE_IMPL_LEVELDB);
     cluster.stop();
     cluster = builder.build();
     StorageContainerManager scm = cluster.getStorageContainerManager();

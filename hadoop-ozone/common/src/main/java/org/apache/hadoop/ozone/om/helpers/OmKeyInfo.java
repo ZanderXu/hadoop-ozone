@@ -24,16 +24,20 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.stream.Collectors;
 
 import org.apache.hadoop.fs.FileEncryptionInfo;
-import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
+import org.apache.hadoop.hdds.client.BlockID;
+import org.apache.hadoop.hdds.client.ContainerBlockID;
+import org.apache.hadoop.hdds.client.ReplicationConfig;
 import org.apache.hadoop.ozone.OzoneAcl;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.KeyInfo;
+import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.KeyLocationList;
 import org.apache.hadoop.ozone.protocolPB.OMPBHelper;
 import org.apache.hadoop.util.Time;
 
 import com.google.common.base.Preconditions;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Args for key block. The block instance for the key requested in putKey.
@@ -41,6 +45,7 @@ import com.google.common.base.Preconditions;
  * datanode. Also, this is the metadata written to om.db on server side.
  */
 public final class OmKeyInfo extends WithObjectID {
+  private static final Logger LOG = LoggerFactory.getLogger(OmKeyInfo.class);
   private final String volumeName;
   private final String bucketName;
   // name of key client specified
@@ -49,8 +54,7 @@ public final class OmKeyInfo extends WithObjectID {
   private List<OmKeyLocationInfoGroup> keyLocationVersions;
   private final long creationTime;
   private long modificationTime;
-  private HddsProtos.ReplicationType type;
-  private HddsProtos.ReplicationFactor factor;
+  private ReplicationConfig replicationConfig;
   private FileEncryptionInfo encInfo;
 
   /**
@@ -62,8 +66,7 @@ public final class OmKeyInfo extends WithObjectID {
   OmKeyInfo(String volumeName, String bucketName, String keyName,
       List<OmKeyLocationInfoGroup> versions, long dataSize,
       long creationTime, long modificationTime,
-      HddsProtos.ReplicationType type,
-      HddsProtos.ReplicationFactor factor,
+      ReplicationConfig replicationConfig,
       Map<String, String> metadata,
       FileEncryptionInfo encInfo, List<OzoneAcl> acls,
       long objectID, long updateID) {
@@ -85,8 +88,7 @@ public final class OmKeyInfo extends WithObjectID {
     this.keyLocationVersions = versions;
     this.creationTime = creationTime;
     this.modificationTime = modificationTime;
-    this.factor = factor;
-    this.type = type;
+    this.replicationConfig = replicationConfig;
     this.metadata = metadata;
     this.encInfo = encInfo;
     this.acls = acls;
@@ -102,12 +104,8 @@ public final class OmKeyInfo extends WithObjectID {
     return bucketName;
   }
 
-  public HddsProtos.ReplicationType getType() {
-    return type;
-  }
-
-  public HddsProtos.ReplicationFactor getFactor() {
-    return factor;
+  public ReplicationConfig getReplicationConfig() {
+    return replicationConfig;
   }
 
   public String getKeyName() {
@@ -145,24 +143,75 @@ public final class OmKeyInfo extends WithObjectID {
    *
    * @param locationInfoList list of locationInfo
    */
-  public void updateLocationInfoList(List<OmKeyLocationInfo> locationInfoList) {
+  public void updateLocationInfoList(List<OmKeyLocationInfo> locationInfoList,
+      boolean isMpu) {
+    updateLocationInfoList(locationInfoList, isMpu, false);
+  }
+
+  /**
+   * updates the length of the each block in the list given.
+   * This will be called when the key is being committed to OzoneManager.
+   *
+   * @param locationInfoList list of locationInfo
+   * @param isMpu a true represents multi part key, false otherwise
+   * @param skipBlockIDCheck a true represents that the blockId verification
+   *                         check should be skipped, false represents that
+   *                         the blockId verification will be required
+   */
+  public void updateLocationInfoList(List<OmKeyLocationInfo> locationInfoList,
+      boolean isMpu, boolean skipBlockIDCheck) {
     long latestVersion = getLatestVersionLocations().getVersion();
     OmKeyLocationInfoGroup keyLocationInfoGroup = getLatestVersionLocations();
-    List<OmKeyLocationInfo> currentList =
-        keyLocationInfoGroup.getLocationList();
-    List<OmKeyLocationInfo> latestVersionList =
-        keyLocationInfoGroup.getBlocksLatestVersionOnly();
+
+    keyLocationInfoGroup.setMultipartKey(isMpu);
+
+    // Compare user given block location against allocatedBlockLocations
+    // present in OmKeyInfo.
+    List<OmKeyLocationInfo> updatedBlockLocations;
+    if (skipBlockIDCheck) {
+      updatedBlockLocations = locationInfoList;
+    } else {
+      updatedBlockLocations =
+          verifyAndGetKeyLocations(locationInfoList, keyLocationInfoGroup);
+    }
     // Updates the latest locationList in the latest version only with
     // given locationInfoList here.
     // TODO : The original allocated list and the updated list here may vary
     // as the containers on the Datanode on which the blocks were pre allocated
     // might get closed. The diff of blocks between these two lists here
     // need to be garbage collected in case the ozone client dies.
-    currentList.removeAll(latestVersionList);
+    keyLocationInfoGroup.removeBlocks(latestVersion);
     // set each of the locationInfo object to the latest version
-    locationInfoList.stream().forEach(omKeyLocationInfo -> omKeyLocationInfo
+    updatedBlockLocations.forEach(omKeyLocationInfo -> omKeyLocationInfo
         .setCreateVersion(latestVersion));
-    currentList.addAll(locationInfoList);
+    keyLocationInfoGroup.addAll(latestVersion, updatedBlockLocations);
+  }
+
+  private List<OmKeyLocationInfo> verifyAndGetKeyLocations(
+      List<OmKeyLocationInfo> locationInfoList,
+      OmKeyLocationInfoGroup keyLocationInfoGroup) {
+
+    List<OmKeyLocationInfo> allocatedBlockLocations =
+        keyLocationInfoGroup.getBlocksLatestVersionOnly();
+    List<OmKeyLocationInfo> updatedBlockLocations = new ArrayList<>();
+
+    List<ContainerBlockID> existingBlockIDs = new ArrayList<>();
+    for (OmKeyLocationInfo existingLocationInfo : allocatedBlockLocations) {
+      BlockID existingBlockID = existingLocationInfo.getBlockID();
+      existingBlockIDs.add(existingBlockID.getContainerBlockID());
+    }
+
+    for (OmKeyLocationInfo modifiedLocationInfo : locationInfoList) {
+      BlockID modifiedBlockID = modifiedLocationInfo.getBlockID();
+      if (existingBlockIDs.contains(modifiedBlockID.getContainerBlockID())) {
+        updatedBlockLocations.add(modifiedLocationInfo);
+      } else {
+        LOG.warn("Unknown BlockLocation:{}, where the blockID of given "
+            + "location doesn't match with the stored/allocated block of"
+            + " keyName:{}", modifiedLocationInfo, keyName);
+      }
+    }
+    return updatedBlockLocations;
   }
 
   /**
@@ -264,8 +313,7 @@ public final class OmKeyInfo extends WithObjectID {
         new ArrayList<>();
     private long creationTime;
     private long modificationTime;
-    private HddsProtos.ReplicationType type;
-    private HddsProtos.ReplicationFactor factor;
+    private ReplicationConfig replicationConfig;
     private Map<String, String> metadata;
     private FileEncryptionInfo encInfo;
     private List<OzoneAcl> acls;
@@ -324,13 +372,8 @@ public final class OmKeyInfo extends WithObjectID {
       return this;
     }
 
-    public Builder setReplicationFactor(HddsProtos.ReplicationFactor replFact) {
-      this.factor = replFact;
-      return this;
-    }
-
-    public Builder setReplicationType(HddsProtos.ReplicationType replType) {
-      this.type = replType;
+    public Builder setReplicationConfig(ReplicationConfig replConfig) {
+      this.replicationConfig = replConfig;
       return this;
     }
 
@@ -376,25 +419,43 @@ public final class OmKeyInfo extends WithObjectID {
     public OmKeyInfo build() {
       return new OmKeyInfo(
           volumeName, bucketName, keyName, omKeyLocationInfoGroups,
-          dataSize, creationTime, modificationTime, type, factor, metadata,
+          dataSize, creationTime, modificationTime, replicationConfig, metadata,
           encInfo, acls, objectID, updateID);
     }
   }
 
-  public KeyInfo getProtobuf() {
+  /**
+   * For network transmit.
+   * @return
+   */
+  public KeyInfo getProtobuf(int clientVersion) {
+    return getProtobuf(false, clientVersion);
+  }
+
+  /**
+   *
+   * @param ignorePipeline true for persist to DB, false for network transmit.
+   * @return
+   */
+  public KeyInfo getProtobuf(boolean ignorePipeline, int clientVersion) {
     long latestVersion = keyLocationVersions.size() == 0 ? -1 :
         keyLocationVersions.get(keyLocationVersions.size() - 1).getVersion();
+
+    List<KeyLocationList> keyLocations = new ArrayList<>();
+    for (OmKeyLocationInfoGroup locationInfoGroup : keyLocationVersions) {
+      keyLocations.add(locationInfoGroup.getProtobuf(
+          ignorePipeline, clientVersion));
+    }
+
     KeyInfo.Builder kb = KeyInfo.newBuilder()
         .setVolumeName(volumeName)
         .setBucketName(bucketName)
         .setKeyName(keyName)
         .setDataSize(dataSize)
-        .setFactor(factor)
-        .setType(type)
-        .addAllKeyLocationList(keyLocationVersions.stream()
-            .map(OmKeyLocationInfoGroup::getProtobuf)
-            .collect(Collectors.toList()))
+        .setType(replicationConfig.getReplicationType())
+        .setFactor(ReplicationConfig.getLegacyFactor(replicationConfig))
         .setLatestVersion(latestVersion)
+        .addAllKeyLocationList(keyLocations)
         .setCreationTime(creationTime)
         .setModificationTime(modificationTime)
         .addAllMetadata(KeyValueUtil.toProtobuf(metadata))
@@ -411,18 +472,23 @@ public final class OmKeyInfo extends WithObjectID {
     if (keyInfo == null) {
       return null;
     }
+
+    List<OmKeyLocationInfoGroup> omKeyLocationInfos = new ArrayList<>();
+    for (KeyLocationList keyLocationList : keyInfo.getKeyLocationListList()) {
+      omKeyLocationInfos.add(
+          OmKeyLocationInfoGroup.getFromProtobuf(keyLocationList));
+    }
+
     Builder builder = new Builder()
         .setVolumeName(keyInfo.getVolumeName())
         .setBucketName(keyInfo.getBucketName())
         .setKeyName(keyInfo.getKeyName())
-        .setOmKeyLocationInfos(keyInfo.getKeyLocationListList().stream()
-            .map(OmKeyLocationInfoGroup::getFromProtobuf)
-            .collect(Collectors.toList()))
+        .setOmKeyLocationInfos(omKeyLocationInfos)
         .setDataSize(keyInfo.getDataSize())
         .setCreationTime(keyInfo.getCreationTime())
         .setModificationTime(keyInfo.getModificationTime())
-        .setReplicationType(keyInfo.getType())
-        .setReplicationFactor(keyInfo.getFactor())
+        .setReplicationConfig(ReplicationConfig
+                .fromTypeAndFactor(keyInfo.getType(), keyInfo.getFactor()))
         .addAllMetadata(KeyValueUtil.getFromProtobuf(keyInfo.getMetadataList()))
         .setFileEncryptionInfo(keyInfo.hasFileEncryptionInfo() ?
             OMPBHelper.convert(keyInfo.getFileEncryptionInfo()) : null)
@@ -444,8 +510,7 @@ public final class OmKeyInfo extends WithObjectID {
         ", key='" + keyName + '\'' +
         ", dataSize='" + dataSize + '\'' +
         ", creationTime='" + creationTime + '\'' +
-        ", type='" + type + '\'' +
-        ", factor='" + factor + '\'' +
+        ", replication='" + replicationConfig +
         '}';
   }
 
@@ -466,8 +531,7 @@ public final class OmKeyInfo extends WithObjectID {
         keyName.equals(omKeyInfo.keyName) &&
         Objects
             .equals(keyLocationVersions, omKeyInfo.keyLocationVersions) &&
-        type == omKeyInfo.type &&
-        factor == omKeyInfo.factor &&
+        replicationConfig.equals(omKeyInfo.replicationConfig) &&
         Objects.equals(metadata, omKeyInfo.metadata) &&
         Objects.equals(acls, omKeyInfo.acls) &&
         objectID == omKeyInfo.objectID &&
@@ -490,18 +554,15 @@ public final class OmKeyInfo extends WithObjectID {
         .setCreationTime(creationTime)
         .setModificationTime(modificationTime)
         .setDataSize(dataSize)
-        .setReplicationType(type)
-        .setReplicationFactor(factor)
+        .setReplicationConfig(replicationConfig)
         .setFileEncryptionInfo(encInfo)
         .setObjectID(objectID).setUpdateID(updateID);
 
 
-    keyLocationVersions.forEach(keyLocationVersion -> {
-      List<OmKeyLocationInfo> keyLocationInfos = new ArrayList<>();
-      keyLocationInfos.addAll(keyLocationVersion.getLocationList());
-      builder.addOmKeyLocationInfoGroup(new OmKeyLocationInfoGroup(
-          keyLocationVersion.getVersion(), keyLocationInfos));
-    });
+    keyLocationVersions.forEach(keyLocationVersion ->
+        builder.addOmKeyLocationInfoGroup(
+            new OmKeyLocationInfoGroup(keyLocationVersion.getVersion(),
+                keyLocationVersion.getLocationList())));
 
     acls.forEach(acl -> builder.addAcl(new OzoneAcl(acl.getType(),
             acl.getName(), (BitSet) acl.getAclBitSet().clone(),

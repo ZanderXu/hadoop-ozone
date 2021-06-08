@@ -19,18 +19,23 @@
 package org.apache.hadoop.ozone;
 
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
-import java.io.FileReader;
 import java.io.IOException;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 
 import org.apache.hadoop.hdds.DFSConfigKeysLegacy;
 import org.apache.hadoop.hdds.HddsConfigKeys;
+import org.apache.hadoop.hdds.client.StandaloneReplicationConfig;
 import org.apache.hadoop.hdds.conf.OzoneConfiguration;
 import org.apache.hadoop.hdds.protocol.DatanodeDetails;
 import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
+import org.apache.hadoop.hdds.protocol.proto.HddsProtos.ReplicationFactor;
+import org.apache.hadoop.hdds.scm.ScmConfigKeys;
 import org.apache.hadoop.hdds.scm.XceiverClientGrpc;
 import org.apache.hadoop.hdds.scm.pipeline.Pipeline;
 import org.apache.hadoop.hdds.scm.pipeline.PipelineID;
@@ -71,19 +76,20 @@ public class TestMiniOzoneCluster {
     * Set a timeout for each test.
     */
   @Rule
-  public Timeout timeout = new Timeout(300000);
+  public Timeout timeout = Timeout.seconds(300);
 
   private MiniOzoneCluster cluster;
   private static OzoneConfiguration conf;
 
-  private final static File TEST_ROOT = TestGenericTestUtils.getTestDir();
-  private final static File WRITE_TMP = new File(TEST_ROOT, "write");
-  private final static File READ_TMP = new File(TEST_ROOT, "read");
+  private static final File TEST_ROOT = TestGenericTestUtils.getTestDir();
+  private static final File WRITE_TMP = new File(TEST_ROOT, "write");
+  private static final File READ_TMP = new File(TEST_ROOT, "read");
 
   @BeforeClass
   public static void setup() {
     conf = new OzoneConfiguration();
     conf.set(HddsConfigKeys.OZONE_METADATA_DIRS, TEST_ROOT.toString());
+    conf.setInt(ScmConfigKeys.OZONE_DATANODE_PIPELINE_LIMIT, 1);
     conf.setBoolean(DFS_CONTAINER_RATIS_IPC_RANDOM_PORT, true);
     WRITE_TMP.mkdirs();
     READ_TMP.mkdirs();
@@ -102,7 +108,7 @@ public class TestMiniOzoneCluster {
     FileUtils.deleteQuietly(READ_TMP);
   }
 
-  @Test(timeout = 30000)
+  @Test(timeout = 60000)
   public void testStartMultipleDatanodes() throws Exception {
     final int numberOfNodes = 3;
     cluster = MiniOzoneCluster.newBuilder(conf)
@@ -118,8 +124,8 @@ public class TestMiniOzoneCluster {
       Pipeline pipeline = Pipeline.newBuilder()
           .setState(Pipeline.PipelineState.OPEN)
           .setId(PipelineID.randomId())
-          .setType(HddsProtos.ReplicationType.STAND_ALONE)
-          .setFactor(HddsProtos.ReplicationFactor.ONE)
+          .setReplicationConfig(new StandaloneReplicationConfig(
+              ReplicationFactor.ONE))
           .setNodes(dns)
           .build();
 
@@ -135,33 +141,12 @@ public class TestMiniOzoneCluster {
   public void testDatanodeIDPersistent() throws Exception {
     // Generate IDs for testing
     DatanodeDetails id1 = randomDatanodeDetails();
-    DatanodeDetails id2 = randomDatanodeDetails();
-    DatanodeDetails id3 = randomDatanodeDetails();
     id1.setPort(DatanodeDetails.newPort(Port.Name.STANDALONE, 1));
-    id2.setPort(DatanodeDetails.newPort(Port.Name.STANDALONE, 2));
-    id3.setPort(DatanodeDetails.newPort(Port.Name.STANDALONE, 3));
+    assertWriteRead(id1);
 
     // Add certificate serial  id.
-    String certSerialId = "" + RandomUtils.nextLong();
-    id1.setCertSerialId(certSerialId);
-
-    // Write a single ID to the file and read it out
-    File validIdsFile = new File(WRITE_TMP, "valid-values.id");
-    validIdsFile.delete();
-    ContainerUtils.writeDatanodeDetailsTo(id1, validIdsFile);
-    // Validate using yaml parser
-    Yaml yaml = new Yaml();
-    try {
-      yaml.load(new FileReader(validIdsFile));
-    } catch (Exception e) {
-      Assert.fail("Failed parsing datanode id yaml.");
-    }
-    DatanodeDetails validId = ContainerUtils.readDatanodeDetailsFrom(
-        validIdsFile);
-
-    assertEquals(validId.getCertSerialId(), certSerialId);
-    assertEquals(id1, validId);
-    assertEquals(id1.getProtoBufMessage(), validId.getProtoBufMessage());
+    id1.setCertSerialId("" + RandomUtils.nextLong());
+    assertWriteRead(id1);
 
     // Read should return an empty value if file doesn't exist
     File nonExistFile = new File(READ_TMP, "non_exist.id");
@@ -189,10 +174,32 @@ public class TestMiniOzoneCluster {
       HddsProtos.DatanodeDetailsProto proto = id1.getProtoBufMessage();
       proto.writeTo(out);
     }
-    validId = ContainerUtils.readDatanodeDetailsFrom(protoFile);
-    assertEquals(validId.getCertSerialId(), certSerialId);
-    assertEquals(id1, validId);
-    assertEquals(id1.getProtoBufMessage(), validId.getProtoBufMessage());
+    assertDetailsEquals(id1, ContainerUtils.readDatanodeDetailsFrom(protoFile));
+
+    id1.setInitialVersion(1);
+    assertWriteRead(id1);
+  }
+
+  private static void assertWriteRead(DatanodeDetails details)
+      throws IOException {
+    // Write a single ID to the file and read it out
+    File file = new File(WRITE_TMP, "valid-values.id");
+    file.delete();
+    ContainerUtils.writeDatanodeDetailsTo(details, file);
+
+    // Validate using yaml parser
+    Yaml yaml = new Yaml();
+    try {
+      yaml.load(new InputStreamReader(new FileInputStream(file),
+          StandardCharsets.UTF_8));
+    } catch (Exception e) {
+      Assert.fail("Failed parsing datanode id yaml.");
+    }
+
+    DatanodeDetails read = ContainerUtils.readDatanodeDetailsFrom(file);
+
+    assertDetailsEquals(details, read);
+    assertEquals(details.getCurrentVersion(), read.getCurrentVersion());
   }
 
   @Test
@@ -214,7 +221,7 @@ public class TestMiniOzoneCluster {
 
       for (int i = 0; i < 3; i++) {
         stateMachines.add(new DatanodeStateMachine(
-            randomDatanodeDetails(), ozoneConf, null, null));
+            randomDatanodeDetails(), ozoneConf, null, null, null));
       }
 
       //we need to start all the servers to get the fix ports
@@ -259,11 +266,11 @@ public class TestMiniOzoneCluster {
     ozoneConf.setBoolean(OzoneConfigKeys.DFS_CONTAINER_IPC_RANDOM_PORT, false);
     try (
         DatanodeStateMachine sm1 = new DatanodeStateMachine(
-            randomDatanodeDetails(), ozoneConf,  null, null);
+            randomDatanodeDetails(), ozoneConf,  null, null, null);
         DatanodeStateMachine sm2 = new DatanodeStateMachine(
-            randomDatanodeDetails(), ozoneConf,  null, null);
+            randomDatanodeDetails(), ozoneConf,  null, null, null);
         DatanodeStateMachine sm3 = new DatanodeStateMachine(
-            randomDatanodeDetails(), ozoneConf,  null, null);
+            randomDatanodeDetails(), ozoneConf,  null, null, null);
     ) {
       HashSet<Integer> ports = new HashSet<Integer>();
       assertTrue(ports.add(sm1.getContainer().getReadChannel().getIPCPort()));
@@ -281,16 +288,22 @@ public class TestMiniOzoneCluster {
     DatanodeDetails id = randomDatanodeDetails();
     ContainerUtils.writeDatanodeDetailsTo(id, malformedFile);
 
-    FileOutputStream out = new FileOutputStream(malformedFile);
-    out.write("malformed".getBytes());
-    out.close();
+    FileOutputStream out = null;
+    try {
+      out = new FileOutputStream(malformedFile);
+      out.write("malformed".getBytes(StandardCharsets.UTF_8));
+    } finally {
+      if (out != null) {
+        out.close();
+      }
+    }
   }
 
   /**
    * Test that a DN can register with SCM even if it was started before the SCM.
    * @throws Exception
    */
-  @Test (timeout = 60000)
+  @Test (timeout = 100000)
   public void testDNstartAfterSCM() throws Exception {
     // Start a cluster with 3 DN
     cluster = MiniOzoneCluster.newBuilder(conf)
@@ -348,5 +361,13 @@ public class TestMiniOzoneCluster {
     Assert.assertEquals(3, cluster.getHddsDatanodes().get(0)
         .getDatanodeStateMachine().getContainer().getVolumeSet()
         .getVolumesList().size());
+  }
+
+  private static void assertDetailsEquals(DatanodeDetails expected,
+      DatanodeDetails actual) {
+    assertEquals(expected, actual);
+    assertEquals(expected.getCertSerialId(), actual.getCertSerialId());
+    assertEquals(expected.getProtoBufMessage(), actual.getProtoBufMessage());
+    assertEquals(expected.getInitialVersion(), actual.getInitialVersion());
   }
 }

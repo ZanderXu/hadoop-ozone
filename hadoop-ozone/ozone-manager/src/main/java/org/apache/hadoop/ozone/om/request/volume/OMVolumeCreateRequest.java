@@ -19,17 +19,18 @@
 package org.apache.hadoop.ozone.om.request.volume;
 
 import java.io.IOException;
-import java.util.HashMap;
 import java.util.Map;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 
 import org.apache.hadoop.ozone.OmUtils;
 import org.apache.hadoop.ozone.om.ratis.utils.OzoneManagerDoubleBufferHelper;
-import org.apache.hadoop.ozone.om.request.file.OMFileRequest;
 import org.apache.hadoop.ozone.om.request.util.OmResponseUtil;
 import org.apache.hadoop.ozone.security.acl.IAccessAuthorizer;
 import org.apache.hadoop.ozone.security.acl.OzoneObj;
+import org.apache.hadoop.ozone.storage.proto.
+    OzoneManagerStorageProtos.PersistedUserVolumeInfo;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -51,7 +52,6 @@ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos
     .OMResponse;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos
     .VolumeInfo;
-import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.UserVolumeInfo;
 import org.apache.hadoop.util.Time;
 
 import static org.apache.hadoop.ozone.om.lock.OzoneManagerLock.Resource.VOLUME_LOCK;
@@ -76,9 +76,13 @@ public class OMVolumeCreateRequest extends OMVolumeRequest {
     // Verify resource name
     OmUtils.validateVolumeName(volumeInfo.getVolume());
 
-    // Set creation time
+    // Set creation time & set modification time
+    long initialTime = Time.now();
     VolumeInfo updatedVolumeInfo =
-        volumeInfo.toBuilder().setCreationTime(Time.now()).build();
+        volumeInfo.toBuilder()
+            .setCreationTime(initialTime)
+            .setModificationTime(initialTime)
+            .build();
 
     return getOmRequest().toBuilder().setCreateVolumeRequest(
         CreateVolumeRequest.newBuilder().setVolumeInfo(updatedVolumeInfo))
@@ -113,14 +117,14 @@ public class OMVolumeCreateRequest extends OMVolumeRequest {
     IOException exception = null;
     OMClientResponse omClientResponse = null;
     OmVolumeArgs omVolumeArgs = null;
-    Map<String, String> auditMap = new HashMap<>();
+    Map<String, String> auditMap = null;
     try {
       omVolumeArgs = OmVolumeArgs.getFromProtobuf(volumeInfo);
       // when you create a volume, we set both Object ID and update ID.
       // The Object ID will never change, but update
       // ID will be set to transactionID each time we update the object.
       omVolumeArgs.setObjectID(
-          OMFileRequest.getObjIDFromTxId(transactionLogIndex));
+          ozoneManager.getObjectIdFromTxId(transactionLogIndex));
       omVolumeArgs.setUpdateID(transactionLogIndex,
           ozoneManager.isRatisEnabled());
 
@@ -143,11 +147,12 @@ public class OMVolumeCreateRequest extends OMVolumeRequest {
 
       String dbVolumeKey = omMetadataManager.getVolumeKey(volume);
 
-      OmVolumeArgs dbVolumeArgs =
-          omMetadataManager.getVolumeTable().get(dbVolumeKey);
-
-      UserVolumeInfo volumeList = null;
-      if (dbVolumeArgs == null) {
+      PersistedUserVolumeInfo volumeList = null;
+      if (omMetadataManager.getVolumeTable().isExist(dbVolumeKey)) {
+        LOG.debug("volume:{} already exists", omVolumeArgs.getVolume());
+        throw new OMException("Volume already exists",
+            OMException.ResultCodes.VOLUME_ALREADY_EXISTS);
+      } else {
         String dbUserKey = omMetadataManager.getUserKey(owner);
         volumeList = omMetadataManager.getUserTable().get(dbUserKey);
         volumeList = addVolumeToOwnerList(volumeList, volume, owner,
@@ -160,20 +165,6 @@ public class OMVolumeCreateRequest extends OMVolumeRequest {
         omClientResponse = new OMVolumeCreateResponse(omResponse.build(),
             omVolumeArgs, volumeList);
         LOG.debug("volume:{} successfully created", omVolumeArgs.getVolume());
-      } else {
-        // Check if this transaction is a replay of ratis logs.
-        if (isReplay(ozoneManager, dbVolumeArgs, transactionLogIndex)) {
-          // Replay implies the response has already been returned to
-          // the client. So take no further action and return a dummy
-          // OMClientResponse.
-          LOG.debug("Replayed Transaction {} ignored. Request: {}",
-              transactionLogIndex, createVolumeRequest);
-          return new OMVolumeCreateResponse(createReplayOMResponse(omResponse));
-        } else {
-          LOG.debug("volume:{} already exists", omVolumeArgs.getVolume());
-          throw new OMException("Volume already exists",
-              OMException.ResultCodes.VOLUME_ALREADY_EXISTS);
-        }
       }
 
     } catch (IOException ex) {
@@ -209,6 +200,11 @@ public class OMVolumeCreateRequest extends OMVolumeRequest {
       omMetrics.incNumVolumeCreateFails();
     }
     return omClientResponse;
+  }
+
+  @VisibleForTesting
+  public static Logger getLogger() {
+    return LOG;
   }
 }
 

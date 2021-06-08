@@ -17,22 +17,28 @@
 
 package org.apache.hadoop.ozone.client.rpc;
 
+import java.io.IOException;
+import java.util.Arrays;
+import java.util.List;
+import java.util.UUID;
+import java.util.concurrent.TimeUnit;
+
 import org.apache.hadoop.conf.StorageUnit;
+import org.apache.hadoop.hdds.client.RatisReplicationConfig;
 import org.apache.hadoop.hdds.client.ReplicationType;
+import org.apache.hadoop.hdds.client.StandaloneReplicationConfig;
 import org.apache.hadoop.hdds.conf.OzoneConfiguration;
-import org.apache.hadoop.hdds.protocol.DatanodeDetails;
-import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
-import org.apache.hadoop.hdds.scm.container.ContainerID;
-import org.apache.hadoop.hdds.scm.container.ContainerInfo;
-import org.apache.hadoop.hdds.scm.pipeline.Pipeline;
+import org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos.ChecksumType;
+import org.apache.hadoop.hdds.scm.OzoneClientConfig;
+import org.apache.hadoop.hdds.scm.ScmConfigKeys;
 import org.apache.hadoop.ozone.MiniOzoneCluster;
 import org.apache.hadoop.ozone.OzoneConfigKeys;
 import org.apache.hadoop.ozone.OzoneConsts;
 import org.apache.hadoop.ozone.client.ObjectStore;
-import org.apache.hadoop.ozone.client.OzoneClient;
 import org.apache.hadoop.ozone.client.OzoneBucket;
-import org.apache.hadoop.ozone.client.OzoneVolume;
+import org.apache.hadoop.ozone.client.OzoneClient;
 import org.apache.hadoop.ozone.client.OzoneClientFactory;
+import org.apache.hadoop.ozone.client.OzoneVolume;
 import org.apache.hadoop.ozone.client.io.KeyOutputStream;
 import org.apache.hadoop.ozone.client.io.OzoneInputStream;
 import org.apache.hadoop.ozone.client.io.OzoneOutputStream;
@@ -41,25 +47,18 @@ import org.apache.hadoop.ozone.container.TestHelper;
 import org.apache.hadoop.ozone.om.helpers.OmKeyArgs;
 import org.apache.hadoop.ozone.om.helpers.OmKeyInfo;
 import org.apache.hadoop.ozone.om.helpers.OmKeyLocationInfo;
+
+import static java.nio.charset.StandardCharsets.UTF_8;
+import static org.apache.hadoop.hdds.protocol.proto.HddsProtos.ReplicationFactor.ONE;
+import static org.apache.hadoop.hdds.protocol.proto.HddsProtos.ReplicationFactor.THREE;
+import static org.apache.hadoop.hdds.scm.ScmConfigKeys.HDDS_SCM_WATCHER_TIMEOUT;
+import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_STALENODE_INTERVAL;
 import org.junit.AfterClass;
 import org.junit.Assert;
 import org.junit.BeforeClass;
-import org.junit.Ignore;
-import org.junit.Test;
-
-import java.io.IOException;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.List;
-import java.util.UUID;
-import java.util.concurrent.TimeUnit;
-
-import static org.apache.hadoop.hdds.scm.ScmConfigKeys.HDDS_SCM_WATCHER_TIMEOUT;
-import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_STALENODE_INTERVAL;
-
 import org.junit.Rule;
+import org.junit.Test;
 import org.junit.rules.Timeout;
-import static java.nio.charset.StandardCharsets.UTF_8;
 
 /**
  * Tests Close Container Exception handling by Ozone Client.
@@ -70,7 +69,7 @@ public class TestCloseContainerHandlingByClient {
     * Set a timeout for each test.
     */
   @Rule
-  public Timeout timeout = new Timeout(300000);
+  public Timeout timeout = Timeout.seconds(300);
 
   private static MiniOzoneCluster cluster;
   private static OzoneConfiguration conf = new OzoneConfiguration();
@@ -93,9 +92,14 @@ public class TestCloseContainerHandlingByClient {
   public static void init() throws Exception {
     chunkSize = (int) OzoneConsts.MB;
     blockSize = 4 * chunkSize;
+
+    OzoneClientConfig config = new OzoneClientConfig();
+    config.setChecksumType(ChecksumType.NONE);
+    conf.setFromObject(config);
+
     conf.setTimeDuration(HDDS_SCM_WATCHER_TIMEOUT, 1000, TimeUnit.MILLISECONDS);
     conf.setTimeDuration(OZONE_SCM_STALENODE_INTERVAL, 3, TimeUnit.SECONDS);
-    conf.set(OzoneConfigKeys.OZONE_CLIENT_CHECKSUM_TYPE, "NONE");
+    conf.setInt(ScmConfigKeys.OZONE_DATANODE_PIPELINE_LIMIT, 1);
     conf.setQuietMode(false);
     conf.setStorageSize(OzoneConfigKeys.OZONE_SCM_BLOCK_SIZE, 4,
         StorageUnit.MB);
@@ -138,8 +142,9 @@ public class TestCloseContainerHandlingByClient {
     Assert.assertTrue(key.getOutputStream() instanceof KeyOutputStream);
     //get the name of a valid container
     OmKeyArgs keyArgs = new OmKeyArgs.Builder().setVolumeName(volumeName)
-        .setBucketName(bucketName).setType(HddsProtos.ReplicationType.RATIS)
-        .setFactor(HddsProtos.ReplicationFactor.ONE).setKeyName(keyName)
+        .setBucketName(bucketName)
+        .setReplicationConfig(new RatisReplicationConfig(ONE))
+        .setKeyName(keyName)
         .setRefreshPipeline(true)
         .build();
 
@@ -172,8 +177,8 @@ public class TestCloseContainerHandlingByClient {
     //get the name of a valid container
     OmKeyArgs keyArgs = new OmKeyArgs.Builder().setVolumeName(volumeName)
         .setBucketName(bucketName)
-        .setType(HddsProtos.ReplicationType.RATIS)
-        .setFactor(HddsProtos.ReplicationFactor.ONE).setKeyName(keyName)
+        .setReplicationConfig(new StandaloneReplicationConfig(ONE))
+        .setKeyName(keyName)
         .setRefreshPipeline(true)
         .build();
 
@@ -206,8 +211,9 @@ public class TestCloseContainerHandlingByClient {
     Assert.assertTrue(key.getOutputStream() instanceof KeyOutputStream);
     //get the name of a valid container
     OmKeyArgs keyArgs = new OmKeyArgs.Builder().setVolumeName(volumeName)
-        .setBucketName(bucketName).setType(HddsProtos.ReplicationType.RATIS)
-        .setFactor(HddsProtos.ReplicationFactor.ONE).setKeyName(keyName)
+        .setBucketName(bucketName)
+        .setReplicationConfig(new RatisReplicationConfig(ONE))
+        .setKeyName(keyName)
         .setRefreshPipeline(true)
         .build();
 
@@ -266,8 +272,9 @@ public class TestCloseContainerHandlingByClient {
     key.write(dataString4.getBytes(UTF_8));
     //get the name of a valid container
     OmKeyArgs keyArgs = new OmKeyArgs.Builder().setVolumeName(volumeName)
-        .setBucketName(bucketName).setType(HddsProtos.ReplicationType.RATIS)
-        .setFactor(HddsProtos.ReplicationFactor.THREE).setKeyName(keyName)
+        .setBucketName(bucketName)
+        .setReplicationConfig(new RatisReplicationConfig(THREE))
+        .setKeyName(keyName)
         .setRefreshPipeline(true)
         .build();
 
@@ -310,8 +317,9 @@ public class TestCloseContainerHandlingByClient {
     Assert.assertTrue(key.getOutputStream() instanceof KeyOutputStream);
     //get the name of a valid container
     OmKeyArgs keyArgs = new OmKeyArgs.Builder().setVolumeName(volumeName)
-        .setBucketName(bucketName).setType(HddsProtos.ReplicationType.RATIS)
-        .setFactor(HddsProtos.ReplicationFactor.ONE).setKeyName(keyName)
+        .setBucketName(bucketName)
+        .setReplicationConfig(new RatisReplicationConfig(THREE))
+        .setKeyName(keyName)
         .setRefreshPipeline(true)
         .build();
 
@@ -350,54 +358,6 @@ public class TestCloseContainerHandlingByClient {
         .waitForContainerClose(outputStream, cluster);
   }
 
-  @Ignore // test needs to be fixed after close container is handled for
-  // non-existent containers on datanode. Test closes pre allocated containers
-  // on the datanode.
-  @Test
-  public void testDiscardPreallocatedBlocks() throws Exception {
-    String keyName = getKeyName();
-    OzoneOutputStream key =
-        createKey(keyName, ReplicationType.RATIS, 2 * blockSize);
-    KeyOutputStream keyOutputStream =
-        (KeyOutputStream) key.getOutputStream();
-
-    Assert.assertTrue(key.getOutputStream() instanceof KeyOutputStream);
-    // With the initial size provided, it should have pre allocated 4 blocks
-    Assert.assertEquals(2, keyOutputStream.getStreamEntries().size());
-    String dataString =
-        ContainerTestHelper.getFixedLengthString(keyString, (1 * blockSize));
-    byte[] data = dataString.getBytes(UTF_8);
-    key.write(data);
-    List<OmKeyLocationInfo> locationInfos =
-        new ArrayList<>(keyOutputStream.getLocationInfoList());
-    long containerID = locationInfos.get(0).getContainerID();
-    ContainerInfo container =
-        cluster.getStorageContainerManager().getContainerManager()
-            .getContainer(ContainerID.valueof(containerID));
-    Pipeline pipeline =
-        cluster.getStorageContainerManager().getPipelineManager()
-            .getPipeline(container.getPipelineID());
-    List<DatanodeDetails> datanodes = pipeline.getNodes();
-    Assert.assertEquals(1, datanodes.size());
-    waitForContainerClose(key);
-    dataString =
-        ContainerTestHelper.getFixedLengthString(keyString, (1 * blockSize));
-    data = dataString.getBytes(UTF_8);
-    key.write(data);
-    Assert.assertEquals(2, keyOutputStream.getStreamEntries().size());
-
-    // the 1st block got written. Now all the containers are closed, so the 2nd
-    // pre allocated block will be removed from the list and new block should
-    // have been allocated
-    Assert.assertTrue(
-        keyOutputStream.getLocationInfoList().get(0).getBlockID()
-            .equals(locationInfos.get(0).getBlockID()));
-    Assert.assertFalse(
-        keyOutputStream.getLocationInfoList().get(1).getBlockID()
-            .equals(locationInfos.get(1).getBlockID()));
-    key.close();
-  }
-
   private OzoneOutputStream createKey(String keyName, ReplicationType type,
       long size) throws Exception {
     return TestHelper
@@ -420,8 +380,9 @@ public class TestCloseContainerHandlingByClient {
 
     //get the name of a valid container
     OmKeyArgs keyArgs = new OmKeyArgs.Builder().setVolumeName(volumeName).
-        setBucketName(bucketName).setType(HddsProtos.ReplicationType.RATIS)
-        .setFactor(HddsProtos.ReplicationFactor.THREE).setKeyName(keyName)
+        setBucketName(bucketName)
+        .setReplicationConfig(new RatisReplicationConfig(THREE))
+        .setKeyName(keyName)
         .setRefreshPipeline(true)
         .build();
 
@@ -454,8 +415,9 @@ public class TestCloseContainerHandlingByClient {
     Assert.assertTrue(key.getOutputStream() instanceof KeyOutputStream);
     //get the name of a valid container
     OmKeyArgs keyArgs = new OmKeyArgs.Builder().setVolumeName(volumeName)
-        .setBucketName(bucketName).setType(HddsProtos.ReplicationType.RATIS)
-        .setFactor(HddsProtos.ReplicationFactor.ONE).setKeyName(keyName)
+        .setBucketName(bucketName)
+        .setReplicationConfig(new RatisReplicationConfig(ONE))
+        .setKeyName(keyName)
         .setRefreshPipeline(true)
         .build();
 
@@ -469,7 +431,7 @@ public class TestCloseContainerHandlingByClient {
     // read the key from OM again and match the length.The length will still
     // be the equal to the original data size.
     OmKeyInfo keyInfo = cluster.getOzoneManager().lookupKey(keyArgs);
-    Assert.assertEquals(5 * chunkSize, keyInfo.getDataSize());
+    Assert.assertEquals((long) 5 * chunkSize, keyInfo.getDataSize());
 
     // Written the same data twice
     String dataString = new String(data1, UTF_8);

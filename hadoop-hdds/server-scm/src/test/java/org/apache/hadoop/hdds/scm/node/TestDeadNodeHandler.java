@@ -31,19 +31,21 @@ import java.util.stream.Collectors;
 
 import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.hdds.HddsConfigKeys;
+import org.apache.hadoop.hdds.client.RatisReplicationConfig;
 import org.apache.hadoop.hdds.conf.OzoneConfiguration;
 import org.apache.hadoop.hdds.protocol.DatanodeDetails;
 import org.apache.hadoop.hdds.protocol.MockDatanodeDetails;
+import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
 import org.apache.hadoop.hdds.protocol.proto
     .StorageContainerDatanodeProtocolProtos.ContainerReplicaProto;
 import org.apache.hadoop.hdds.protocol.proto
     .StorageContainerDatanodeProtocolProtos.NodeReportProto;
 import org.apache.hadoop.hdds.protocol.proto
     .StorageContainerDatanodeProtocolProtos.StorageReportProto;
-import org.apache.hadoop.hdds.scm.HddsTestUtils;
+import org.apache.hadoop.hdds.scm.ScmConfigKeys;
 import org.apache.hadoop.hdds.scm.TestUtils;
 import org.apache.hadoop.hdds.scm.container.ContainerID;
-import org.apache.hadoop.hdds.scm.container.ContainerManager;
+import org.apache.hadoop.hdds.scm.container.ContainerManagerV2;
 import org.apache.hadoop.hdds.scm.container.ContainerNotFoundException;
 import org.apache.hadoop.hdds.scm.container.ContainerReplica;
 import org.apache.hadoop.hdds.scm.container.ContainerInfo;
@@ -51,7 +53,7 @@ import org.apache.hadoop.hdds.scm.events.SCMEvents;
 import org.apache.hadoop.hdds.scm.node.states.NodeNotFoundException;
 import org.apache.hadoop.hdds.scm.pipeline.PipelineManager;
 import org.apache.hadoop.hdds.scm.pipeline.PipelineProvider;
-import org.apache.hadoop.hdds.scm.pipeline.SCMPipelineManager;
+import org.apache.hadoop.hdds.scm.pipeline.PipelineManagerV2Impl;
 import org.apache.hadoop.hdds.scm.pipeline.MockRatisPipelineProvider;
 import org.apache.hadoop.hdds.scm.server.SCMDatanodeHeartbeatDispatcher
     .NodeReportFromDatanode;
@@ -59,10 +61,11 @@ import org.apache.hadoop.hdds.scm.server.StorageContainerManager;
 import org.apache.hadoop.hdds.server.events.EventPublisher;
 
 import org.apache.hadoop.hdds.server.events.EventQueue;
+import org.apache.hadoop.ozone.OzoneConsts;
 import org.apache.hadoop.security.authentication.client
     .AuthenticationException;
-import org.apache.hadoop.test.GenericTestUtils;
-import org.apache.hadoop.test.LambdaTestUtils;
+import org.apache.ozone.test.GenericTestUtils;
+import org.apache.ozone.test.LambdaTestUtils;
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
@@ -76,9 +79,9 @@ public class TestDeadNodeHandler {
 
   private StorageContainerManager scm;
   private SCMNodeManager nodeManager;
-  private ContainerManager containerManager;
+  private ContainerManagerV2 containerManager;
   private NodeReportHandler nodeReportHandler;
-  private SCMPipelineManager pipelineManager;
+  private PipelineManagerV2Impl pipelineManager;
   private DeadNodeHandler deadNodeHandler;
   private EventPublisher publisher;
   private EventQueue eventQueue;
@@ -89,14 +92,15 @@ public class TestDeadNodeHandler {
     OzoneConfiguration conf = new OzoneConfiguration();
     conf.setTimeDuration(HddsConfigKeys.HDDS_SCM_WAIT_TIME_AFTER_SAFE_MODE_EXIT,
         0, TimeUnit.SECONDS);
+    conf.setInt(ScmConfigKeys.OZONE_DATANODE_PIPELINE_LIMIT, 2);
     storageDir = GenericTestUtils.getTempPath(
         TestDeadNodeHandler.class.getSimpleName() + UUID.randomUUID());
     conf.set(HddsConfigKeys.OZONE_METADATA_DIRS, storageDir);
     eventQueue = new EventQueue();
-    scm = HddsTestUtils.getScm(conf);
+    scm = TestUtils.getScm(conf);
     nodeManager = (SCMNodeManager) scm.getScmNodeManager();
     pipelineManager =
-        (SCMPipelineManager)scm.getPipelineManager();
+        (PipelineManagerV2Impl)scm.getPipelineManager();
     PipelineProvider mockRatisProvider =
         new MockRatisPipelineProvider(nodeManager,
             pipelineManager.getStateManager(), conf);
@@ -128,7 +132,8 @@ public class TestDeadNodeHandler {
         .concat("/" + datanode1.getUuidString());
 
     StorageReportProto storageOne = TestUtils.createStorageReport(
-        datanode1.getUuid(), storagePath, 100, 10, 90, null);
+        datanode1.getUuid(), storagePath, 100 * OzoneConsts.TB,
+        10 * OzoneConsts.TB, 90 * OzoneConsts.TB, null);
 
     // Exit safemode, as otherwise the safemode precheck will prevent pipelines
     // from getting created. Due to how this test is wired up, safemode will
@@ -161,8 +166,8 @@ public class TestDeadNodeHandler {
 
     LambdaTestUtils.await(120000, 1000,
         () -> {
-          pipelineManager.triggerPipelineCreation();
-          return pipelineManager.getPipelines(RATIS, THREE).size() == 3;
+          return pipelineManager.getPipelines(new RatisReplicationConfig(THREE))
+              .size() > 3;
         });
     TestUtils.openAllRatisPipelines(pipelineManager);
 
@@ -188,33 +193,56 @@ public class TestDeadNodeHandler {
     TestUtils.closeContainer(containerManager, container2.containerID());
     TestUtils.quasiCloseContainer(containerManager, container3.containerID());
 
+    // First set the node to IN_MAINTENANCE and ensure the container replicas
+    // are not removed on the dead event
+    nodeManager.setNodeOperationalState(datanode1,
+        HddsProtos.NodeOperationalState.IN_MAINTENANCE);
     deadNodeHandler.onMessage(datanode1, publisher);
 
     Set<ContainerReplica> container1Replicas = containerManager
-        .getContainerReplicas(new ContainerID(container1.getContainerID()));
+        .getContainerReplicas(ContainerID.valueOf(container1.getContainerID()));
+    Assert.assertEquals(2, container1Replicas.size());
+
+    Set<ContainerReplica> container2Replicas = containerManager
+        .getContainerReplicas(ContainerID.valueOf(container2.getContainerID()));
+    Assert.assertEquals(2, container2Replicas.size());
+
+    Set<ContainerReplica> container3Replicas = containerManager
+            .getContainerReplicas(
+                ContainerID.valueOf(container3.getContainerID()));
+    Assert.assertEquals(1, container3Replicas.size());
+
+    // Now set the node to anything other than IN_MAINTENANCE and the relevant
+    // replicas should be removed
+    nodeManager.setNodeOperationalState(datanode1,
+        HddsProtos.NodeOperationalState.IN_SERVICE);
+    deadNodeHandler.onMessage(datanode1, publisher);
+
+    container1Replicas = containerManager
+        .getContainerReplicas(ContainerID.valueOf(container1.getContainerID()));
     Assert.assertEquals(1, container1Replicas.size());
     Assert.assertEquals(datanode2,
         container1Replicas.iterator().next().getDatanodeDetails());
 
-    Set<ContainerReplica> container2Replicas = containerManager
-        .getContainerReplicas(new ContainerID(container2.getContainerID()));
+    container2Replicas = containerManager
+        .getContainerReplicas(ContainerID.valueOf(container2.getContainerID()));
     Assert.assertEquals(1, container2Replicas.size());
     Assert.assertEquals(datanode2,
         container2Replicas.iterator().next().getDatanodeDetails());
 
-    Set<ContainerReplica> container3Replicas = containerManager
-            .getContainerReplicas(new ContainerID(container3.getContainerID()));
+    container3Replicas = containerManager
+        .getContainerReplicas(ContainerID.valueOf(container3.getContainerID()));
     Assert.assertEquals(1, container3Replicas.size());
     Assert.assertEquals(datanode3,
         container3Replicas.iterator().next().getDatanodeDetails());
   }
 
-  private void registerReplicas(ContainerManager contManager,
+  private void registerReplicas(ContainerManagerV2 contManager,
       ContainerInfo container, DatanodeDetails... datanodes)
       throws ContainerNotFoundException {
     for (DatanodeDetails datanode : datanodes) {
       contManager.updateContainerReplica(
-          new ContainerID(container.getContainerID()),
+          ContainerID.valueOf(container.getContainerID()),
           ContainerReplica.newBuilder()
               .setContainerState(ContainerReplicaProto.State.OPEN)
               .setContainerID(container.containerID())
@@ -234,7 +262,7 @@ public class TestDeadNodeHandler {
     nodeManager
         .setContainers(datanode,
             Arrays.stream(containers)
-                .map(container -> new ContainerID(container.getContainerID()))
+                .map(ContainerInfo::containerID)
                 .collect(Collectors.toSet()));
   }
 

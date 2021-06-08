@@ -34,7 +34,7 @@ import org.apache.hadoop.ozone.container.ozoneimpl.OzoneContainer;
 import org.apache.hadoop.ozone.protocol.commands.CloseContainerCommand;
 import org.apache.hadoop.ozone.protocol.commands.SCMCommand;
 import org.apache.hadoop.util.Time;
-import org.apache.ratis.protocol.NotLeaderException;
+import org.apache.ratis.protocol.exceptions.NotLeaderException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -98,7 +98,8 @@ public class CloseContainerCommandHandler implements CommandHandler {
             .isExist(closeCommand.getPipelineID())) {
           ContainerCommandRequestProto request =
               getContainerCommandRequestProto(datanodeDetails,
-                  closeCommand.getContainerID());
+                  closeCommand.getContainerID(),
+                  command.getEncodedToken());
           ozoneContainer.getWriteChannel()
               .submitRequest(request, closeCommand.getPipelineID());
         } else {
@@ -134,7 +135,8 @@ public class CloseContainerCommandHandler implements CommandHandler {
   }
 
   private ContainerCommandRequestProto getContainerCommandRequestProto(
-      final DatanodeDetails datanodeDetails, final long containerId) {
+      final DatanodeDetails datanodeDetails, final long containerId,
+      final String encodedToken) {
     final ContainerCommandRequestProto.Builder command =
         ContainerCommandRequestProto.newBuilder();
     command.setCmdType(ContainerProtos.Type.CloseContainer);
@@ -143,6 +145,9 @@ public class CloseContainerCommandHandler implements CommandHandler {
     command.setCloseContainer(
         ContainerProtos.CloseContainerRequestProto.getDefaultInstance());
     command.setDatanodeUuid(datanodeDetails.getUuidString());
+    if (encodedToken != null) {
+      command.setEncodedToken(encodedToken);
+    }
     return command.build();
   }
 

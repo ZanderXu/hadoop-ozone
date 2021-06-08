@@ -18,12 +18,12 @@ package org.apache.hadoop.ozone.recon;
 
 import static java.net.HttpURLConnection.HTTP_CREATED;
 import static java.net.HttpURLConnection.HTTP_OK;
-import static org.apache.hadoop.ozone.recon.ReconServerConfigKeys.RECON_OM_CONNECTION_REQUEST_TIMEOUT;
-import static org.apache.hadoop.ozone.recon.ReconServerConfigKeys.RECON_OM_CONNECTION_REQUEST_TIMEOUT_DEFAULT;
-import static org.apache.hadoop.ozone.recon.ReconServerConfigKeys.RECON_OM_CONNECTION_TIMEOUT;
-import static org.apache.hadoop.ozone.recon.ReconServerConfigKeys.RECON_OM_CONNECTION_TIMEOUT_DEFAULT;
-import static org.apache.hadoop.ozone.recon.ReconServerConfigKeys.RECON_OM_SOCKET_TIMEOUT;
-import static org.apache.hadoop.ozone.recon.ReconServerConfigKeys.RECON_OM_SOCKET_TIMEOUT_DEFAULT;
+import static org.apache.hadoop.ozone.recon.ReconServerConfigKeys.OZONE_RECON_OM_CONNECTION_REQUEST_TIMEOUT;
+import static org.apache.hadoop.ozone.recon.ReconServerConfigKeys.OZONE_RECON_OM_CONNECTION_REQUEST_TIMEOUT_DEFAULT;
+import static org.apache.hadoop.ozone.recon.ReconServerConfigKeys.OZONE_RECON_OM_CONNECTION_TIMEOUT;
+import static org.apache.hadoop.ozone.recon.ReconServerConfigKeys.OZONE_RECON_OM_CONNECTION_TIMEOUT_DEFAULT;
+import static org.apache.hadoop.ozone.recon.ReconServerConfigKeys.OZONE_RECON_OM_SOCKET_TIMEOUT;
+import static org.apache.hadoop.ozone.recon.ReconServerConfigKeys.OZONE_RECON_OM_SOCKET_TIMEOUT_DEFAULT;
 import static org.apache.hadoop.ozone.recon.spi.impl.OzoneManagerServiceProviderImpl.OmSnapshotTaskName.OmDeltaRequest;
 import static org.apache.hadoop.ozone.recon.spi.impl.OzoneManagerServiceProviderImpl.OmSnapshotTaskName.OmSnapshotRequest;
 
@@ -38,10 +38,11 @@ import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
 import org.apache.hadoop.hdds.client.BlockID;
+import org.apache.hadoop.hdds.client.StandaloneReplicationConfig;
 import org.apache.hadoop.hdds.conf.OzoneConfiguration;
 import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
+import org.apache.hadoop.hdds.scm.TestUtils;
 import org.apache.hadoop.hdds.scm.pipeline.Pipeline;
-import org.apache.hadoop.hdds.scm.pipeline.PipelineID;
 import org.apache.hadoop.hdds.utils.db.RDBStore;
 import org.apache.hadoop.hdds.utils.db.Table;
 import org.apache.hadoop.hdds.utils.db.TableIterator;
@@ -77,7 +78,7 @@ public class TestReconWithOzoneManager {
     * Set a timeout for each test.
     */
   @Rule
-  public Timeout timeout = new Timeout(300000);
+  public Timeout timeout = Timeout.seconds(300);
   private static MiniOzoneCluster cluster = null;
   private static OzoneConfiguration conf;
   private static OMMetadataManager metadataManager;
@@ -89,14 +90,24 @@ public class TestReconWithOzoneManager {
   public static void init() throws Exception {
     conf = new OzoneConfiguration();
     int socketTimeout = (int) conf.getTimeDuration(
-        RECON_OM_SOCKET_TIMEOUT, RECON_OM_SOCKET_TIMEOUT_DEFAULT,
+        OZONE_RECON_OM_SOCKET_TIMEOUT,
+        conf.get(
+            ReconServerConfigKeys.RECON_OM_SOCKET_TIMEOUT,
+            OZONE_RECON_OM_SOCKET_TIMEOUT_DEFAULT),
         TimeUnit.MILLISECONDS);
     int connectionTimeout = (int) conf.getTimeDuration(
-        RECON_OM_CONNECTION_TIMEOUT,
-        RECON_OM_CONNECTION_TIMEOUT_DEFAULT, TimeUnit.MILLISECONDS);
+        OZONE_RECON_OM_CONNECTION_TIMEOUT,
+        conf.get(
+            ReconServerConfigKeys.RECON_OM_CONNECTION_TIMEOUT,
+            OZONE_RECON_OM_CONNECTION_TIMEOUT_DEFAULT),
+        TimeUnit.MILLISECONDS);
     int connectionRequestTimeout = (int)conf.getTimeDuration(
-        RECON_OM_CONNECTION_REQUEST_TIMEOUT,
-        RECON_OM_CONNECTION_REQUEST_TIMEOUT_DEFAULT, TimeUnit.MILLISECONDS);
+        OZONE_RECON_OM_CONNECTION_REQUEST_TIMEOUT,
+        conf.get(
+            ReconServerConfigKeys.RECON_OM_CONNECTION_REQUEST_TIMEOUT,
+            OZONE_RECON_OM_CONNECTION_REQUEST_TIMEOUT_DEFAULT),
+        TimeUnit.MILLISECONDS
+    );
     RequestConfig config = RequestConfig.custom()
         .setConnectTimeout(socketTimeout)
         .setConnectionRequestTimeout(connectionTimeout)
@@ -335,7 +346,7 @@ public class TestReconWithOzoneManager {
    */
   private void addKeys(int start, int end) throws Exception {
     for(int i = start; i < end; i++) {
-      Pipeline pipeline = getRandomPipeline();
+      Pipeline pipeline = TestUtils.getRandomPipeline();
       List<OmKeyLocationInfo> omKeyLocationInfoList = new ArrayList<>();
       BlockID blockID = new BlockID(i, 1);
       OmKeyLocationInfo omKeyLocationInfo1 = getOmKeyLocationInfo(blockID,
@@ -356,16 +367,6 @@ public class TestReconWithOzoneManager {
       iterator.next();
     }
     return keyCount;
-  }
-
-  private static Pipeline getRandomPipeline() {
-    return Pipeline.newBuilder()
-        .setFactor(HddsProtos.ReplicationFactor.ONE)
-        .setId(PipelineID.randomId())
-        .setNodes(Collections.EMPTY_LIST)
-        .setState(Pipeline.PipelineState.OPEN)
-        .setType(HddsProtos.ReplicationType.STAND_ALONE)
-        .build();
   }
 
   private static OmKeyLocationInfo getOmKeyLocationInfo(BlockID blockID,
@@ -389,8 +390,8 @@ public class TestReconWithOzoneManager {
             .setBucketName(bucket)
             .setVolumeName(volume)
             .setKeyName(key)
-            .setReplicationFactor(HddsProtos.ReplicationFactor.ONE)
-            .setReplicationType(HddsProtos.ReplicationType.STAND_ALONE)
+            .setReplicationConfig(new StandaloneReplicationConfig(
+                HddsProtos.ReplicationFactor.ONE))
             .setOmKeyLocationInfos(omKeyLocationInfoGroupList)
             .build());
   }

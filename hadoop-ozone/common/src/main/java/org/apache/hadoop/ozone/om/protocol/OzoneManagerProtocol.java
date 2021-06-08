@@ -29,6 +29,7 @@ import org.apache.hadoop.ozone.om.exceptions.OMException;
 import org.apache.hadoop.ozone.om.helpers.DBUpdates;
 import org.apache.hadoop.ozone.om.helpers.OmBucketArgs;
 import org.apache.hadoop.ozone.om.helpers.OmBucketInfo;
+import org.apache.hadoop.ozone.om.helpers.OmDeleteKeys;
 import org.apache.hadoop.ozone.om.helpers.OmKeyArgs;
 import org.apache.hadoop.ozone.om.helpers.OmKeyInfo;
 import org.apache.hadoop.ozone.om.helpers.OmKeyLocationInfo;
@@ -38,6 +39,7 @@ import org.apache.hadoop.ozone.om.helpers.OmMultipartUploadCompleteInfo;
 import org.apache.hadoop.ozone.om.helpers.OmMultipartUploadCompleteList;
 import org.apache.hadoop.ozone.om.helpers.OmMultipartUploadList;
 import org.apache.hadoop.ozone.om.helpers.OmMultipartUploadListParts;
+import org.apache.hadoop.ozone.om.helpers.OmRenameKeys;
 import org.apache.hadoop.ozone.om.helpers.OmVolumeArgs;
 import org.apache.hadoop.ozone.om.helpers.OpenKeySession;
 import org.apache.hadoop.ozone.om.helpers.OzoneFileStatus;
@@ -87,10 +89,12 @@ public interface OzoneManagerProtocol
   /**
    * Changes the Quota on a volume.
    * @param volume - Name of the volume.
-   * @param quota - Quota in bytes.
+   * @param quotaInNamespace - Volume quota in counts.
+   * @param quotaInBytes - Volume quota in bytes.
    * @throws IOException
    */
-  void setQuota(String volume, long quota) throws IOException;
+  void setQuota(String volume, long quotaInNamespace, long quotaInBytes)
+      throws IOException;
 
   /**
    * Checks if the specified user can access this volume.
@@ -217,12 +221,30 @@ public interface OzoneManagerProtocol
   void renameKey(OmKeyArgs args, String toKeyName) throws IOException;
 
   /**
+   * Rename existing keys within a bucket.
+   * @param omRenameKeys Includes volume, bucket, and fromKey toKey name map
+   *                     and fromKey name toKey info Map.
+   * @throws IOException
+   */
+  void renameKeys(OmRenameKeys omRenameKeys) throws IOException;
+
+  /**
    * Deletes an existing key.
    *
    * @param args the args of the key.
    * @throws IOException
    */
   void deleteKey(OmKeyArgs args) throws IOException;
+
+  /**
+   * Deletes existing key/keys. This interface supports delete
+   * multiple keys and a single key. Used by deleting files
+   * through OzoneFileSystem.
+   *
+   * @param deleteKeys
+   * @throws IOException
+   */
+  void deleteKeys(OmDeleteKeys deleteKeys) throws IOException;
 
   /**
    * Deletes an existing empty bucket from volume.
@@ -350,6 +372,7 @@ public interface OzoneManagerProtocol
    */
   OmMultipartUploadList listMultipartUploads(String volumeName,
       String bucketName, String prefix) throws IOException;
+
   /**
    * Gets s3Secret for given kerberos user.
    * @param kerberosID
@@ -357,6 +380,13 @@ public interface OzoneManagerProtocol
    * @throws IOException
    */
   S3SecretValue getS3Secret(String kerberosID) throws IOException;
+
+  /**
+   * Revokes s3Secret of given kerberos user.
+   * @param kerberosID
+   * @throws IOException
+   */
+  void revokeS3Secret(String kerberosID) throws IOException;
 
   /**
    * OzoneFS api to get file status for an entry.

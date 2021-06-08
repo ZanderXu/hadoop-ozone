@@ -259,7 +259,7 @@ public abstract class ContainerData {
   }
 
   /**
-   * Retuns metadata of the container.
+   * Returns metadata of the container.
    * @return metadata
    */
   public Map<String, String> getMetadata() {
@@ -291,7 +291,7 @@ public abstract class ContainerData {
    * @return - boolean
    */
   public synchronized boolean isValid() {
-    return !(ContainerDataProto.State.INVALID == state);
+    return ContainerDataProto.State.INVALID != state;
   }
 
   /**

@@ -18,12 +18,14 @@
 
 package org.apache.hadoop.ozone.client.rpc;
 
+import java.io.IOException;
+
 import org.apache.hadoop.hdds.conf.OzoneConfiguration;
 import org.apache.hadoop.hdds.scm.ScmConfigKeys;
+
+import org.apache.hadoop.ozone.OzoneConfigKeys;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
-
-import java.io.IOException;
 import org.junit.Rule;
 import org.junit.rules.Timeout;
 
@@ -37,7 +39,7 @@ public class TestOzoneRpcClient extends TestOzoneRpcClientAbstract {
     * Set a timeout for each test.
     */
   @Rule
-  public Timeout timeout = new Timeout(300000);
+  public Timeout timeout = Timeout.seconds(300);
 
   /**
    * Create a MiniOzoneCluster for testing.
@@ -50,6 +52,9 @@ public class TestOzoneRpcClient extends TestOzoneRpcClientAbstract {
   public static void init() throws Exception {
     OzoneConfiguration conf = new OzoneConfiguration();
     conf.setInt(ScmConfigKeys.OZONE_SCM_PIPELINE_OWNER_CONTAINER_COUNT, 1);
+    conf.setBoolean(OzoneConfigKeys.OZONE_ACL_ENABLED, true);
+    conf.set(OzoneConfigKeys.OZONE_ACL_AUTHORIZER_CLASS,
+        OzoneConfigKeys.OZONE_ACL_AUTHORIZER_CLASS_NATIVE);
     startCluster(conf);
   }
 

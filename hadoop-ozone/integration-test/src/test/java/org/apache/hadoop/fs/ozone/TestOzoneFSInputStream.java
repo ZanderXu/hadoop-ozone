@@ -28,7 +28,6 @@ import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hdds.conf.OzoneConfiguration;
-import org.apache.hadoop.hdfs.DFSUtil;
 import org.apache.hadoop.ozone.MiniOzoneCluster;
 import org.apache.hadoop.ozone.OzoneConsts;
 import org.apache.hadoop.ozone.TestDataUtil;
@@ -42,6 +41,8 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.Timeout;
 
+import static org.apache.hadoop.hdds.StringUtils.string2Bytes;
+
 /**
  * Test OzoneFSInputStream by reading through multiple interfaces.
  */
@@ -51,7 +52,7 @@ public class TestOzoneFSInputStream {
     * Set a timeout for each test.
     */
   @Rule
-  public Timeout timeout = new Timeout(300000);
+  public Timeout timeout = Timeout.seconds(300);
   private static MiniOzoneCluster cluster = null;
   private static FileSystem fs;
   private static Path filePath = null;
@@ -85,7 +86,7 @@ public class TestOzoneFSInputStream {
     conf.set(CommonConfigurationKeysPublic.FS_DEFAULT_NAME_KEY, uri);
     fs =  FileSystem.get(conf);
     int fileLen = 30 * 1024 * 1024;
-    data = DFSUtil.string2Bytes(RandomStringUtils.randomAlphanumeric(fileLen));
+    data = string2Bytes(RandomStringUtils.randomAlphanumeric(fileLen));
     filePath = new Path("/" + RandomStringUtils.randomAlphanumeric(5));
     try (FSDataOutputStream stream = fs.create(filePath)) {
       stream.write(data);
@@ -134,7 +135,7 @@ public class TestOzoneFSInputStream {
         System.arraycopy(tmp, 0, value, i * tmp.length, tmp.length);
         i++;
       }
-      Assert.assertEquals(i * tmp.length, data.length);
+      Assert.assertEquals((long) i * tmp.length, data.length);
       Assert.assertArrayEquals(value, data);
     }
   }

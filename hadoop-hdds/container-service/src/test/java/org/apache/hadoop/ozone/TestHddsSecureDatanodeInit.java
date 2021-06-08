@@ -34,8 +34,8 @@ import org.apache.hadoop.hdds.security.x509.certificate.client.DNCertificateClie
 import org.apache.hadoop.hdds.security.x509.certificate.utils.CertificateCodec;
 import org.apache.hadoop.hdds.security.x509.keys.KeyCodec;
 import org.apache.hadoop.security.ssl.KeyStoreTestUtil;
-import org.apache.hadoop.test.GenericTestUtils;
-import org.apache.hadoop.test.LambdaTestUtils;
+import org.apache.ozone.test.GenericTestUtils;
+import org.apache.ozone.test.LambdaTestUtils;
 import org.apache.hadoop.util.ServicePlugin;
 
 import org.apache.commons.io.FileUtils;
@@ -61,12 +61,13 @@ public class TestHddsSecureDatanodeInit {
   private static PrivateKey privateKey;
   private static PublicKey publicKey;
   private static GenericTestUtils.LogCapturer dnLogs;
-  private static CertificateClient client;
   private static SecurityConfig securityConfig;
   private static KeyCodec keyCodec;
   private static CertificateCodec certCodec;
   private static X509CertificateHolder certHolder;
-  private final static String DN_COMPONENT = DNCertificateClient.COMPONENT_NAME;
+  private static final String DN_COMPONENT = DNCertificateClient.COMPONENT_NAME;
+
+  private CertificateClient client;
 
   @BeforeClass
   public static void setUp() throws Exception {

@@ -27,11 +27,16 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.EnumSet;
 import java.util.List;
+import java.util.Map;
 
 import com.google.common.base.Optional;
 import com.google.common.base.Preconditions;
+import org.apache.hadoop.hdds.client.ReplicationConfig;
+import org.apache.hadoop.hdds.utils.db.cache.CacheKey;
 import org.apache.hadoop.ozone.OzoneAcl;
+import org.apache.hadoop.ozone.OzoneConsts;
 import org.apache.hadoop.ozone.om.PrefixManager;
+import org.apache.hadoop.ozone.om.ResolvedBucket;
 import org.apache.hadoop.ozone.om.helpers.BucketEncryptionKeyInfo;
 import org.apache.hadoop.ozone.om.helpers.KeyValueUtil;
 import org.apache.hadoop.ozone.om.helpers.OmBucketInfo;
@@ -39,8 +44,8 @@ import org.apache.hadoop.ozone.om.helpers.OmKeyInfo;
 import org.apache.hadoop.ozone.om.helpers.OmKeyLocationInfo;
 import org.apache.hadoop.ozone.om.helpers.OmKeyLocationInfoGroup;
 import org.apache.hadoop.ozone.om.helpers.OmPrefixInfo;
+import org.apache.hadoop.ozone.om.helpers.OmVolumeArgs;
 import org.apache.hadoop.ozone.om.helpers.OzoneAclUtil;
-import org.apache.hadoop.ozone.om.request.file.OMFileRequest;
 import org.apache.hadoop.ozone.protocolPB.OMPBHelper;
 import org.apache.hadoop.ozone.security.acl.IAccessAuthorizer;
 import org.apache.hadoop.ozone.security.acl.OzoneObj;
@@ -69,6 +74,8 @@ import org.apache.hadoop.ozone.security.OzoneBlockTokenSecretManager;
 import org.apache.hadoop.security.SecurityUtil;
 import org.apache.hadoop.security.UserGroupInformation;
 
+import static org.apache.hadoop.hdds.protocol.proto.HddsProtos.BlockTokenSecretProto.AccessModeProto.READ;
+import static org.apache.hadoop.hdds.protocol.proto.HddsProtos.BlockTokenSecretProto.AccessModeProto.WRITE;
 import static org.apache.hadoop.ozone.OzoneConsts.OZONE_URI_DELIMITER;
 import static org.apache.hadoop.ozone.om.exceptions.OMException.ResultCodes
     .BUCKET_NOT_FOUND;
@@ -86,6 +93,15 @@ public abstract class OMKeyRequest extends OMClientRequest {
 
   public OMKeyRequest(OMRequest omRequest) {
     super(omRequest);
+  }
+
+  protected KeyArgs resolveBucketLink(
+      OzoneManager ozoneManager, KeyArgs keyArgs,
+      Map<String, String> auditMap) throws IOException {
+    ResolvedBucket bucket = ozoneManager.resolveBucketLink(keyArgs, this);
+    keyArgs = bucket.update(keyArgs);
+    bucket.audit(auditMap);
+    return keyArgs;
   }
 
   /**
@@ -121,15 +137,15 @@ public abstract class OMKeyRequest extends OMClientRequest {
       throw ex;
     }
     for (AllocatedBlock allocatedBlock : allocatedBlocks) {
+      BlockID blockID = new BlockID(allocatedBlock.getBlockID());
       OmKeyLocationInfo.Builder builder = new OmKeyLocationInfo.Builder()
-          .setBlockID(new BlockID(allocatedBlock.getBlockID()))
+          .setBlockID(blockID)
           .setLength(scmBlockSize)
           .setOffset(0)
           .setPipeline(allocatedBlock.getPipeline());
       if (grpcBlockTokenEnabled) {
-        builder.setToken(secretManager
-            .generateToken(remoteUser, allocatedBlock.getBlockID().toString(),
-                getAclForUser(remoteUser), scmBlockSize));
+        builder.setToken(secretManager.generateToken(remoteUser, blockID,
+            EnumSet.of(READ, WRITE), scmBlockSize));
       }
       locationInfos.add(builder.build());
     }
@@ -142,18 +158,6 @@ public abstract class OMKeyRequest extends OMClientRequest {
   private UserGroupInformation getRemoteUser() throws IOException {
     UserGroupInformation ugi = Server.getRemoteUser();
     return (ugi != null) ? ugi : UserGroupInformation.getCurrentUser();
-  }
-
-  /**
-   * Return acl for user.
-   * @param user
-   *
-   * */
-  private EnumSet< HddsProtos.BlockTokenSecretProto.AccessModeProto>
-      getAclForUser(String user) {
-    // TODO: Return correct acl for user.
-    return EnumSet.allOf(
-        HddsProtos.BlockTokenSecretProto.AccessModeProto.class);
   }
 
   /**
@@ -181,6 +185,19 @@ public abstract class OMKeyRequest extends OMClientRequest {
       // exception
       throw new OMException("Bucket not found " + bucketName, BUCKET_NOT_FOUND);
     }
+  }
+
+  // For keys batch delete and rename only
+  protected String getVolumeOwner(OMMetadataManager omMetadataManager,
+      String volumeName) throws IOException {
+    String dbVolumeKey = omMetadataManager.getVolumeKey(volumeName);
+    OmVolumeArgs volumeArgs =
+        omMetadataManager.getVolumeTable().get(dbVolumeKey);
+    if (volumeArgs == null) {
+      throw new OMException("Volume not found " + volumeName,
+          VOLUME_NOT_FOUND);
+    }
+    return volumeArgs.getOwnerName();
   }
 
   protected static Optional<FileEncryptionInfo> getFileEncryptionInfo(
@@ -230,14 +247,12 @@ public abstract class OMKeyRequest extends OMClientRequest {
   @SuppressWarnings("parameterNumber")
   protected OmKeyInfo createKeyInfo(@Nonnull KeyArgs keyArgs,
       @Nonnull List<OmKeyLocationInfo> locations,
-      @Nonnull HddsProtos.ReplicationFactor factor,
-      @Nonnull HddsProtos.ReplicationType type, long size,
+      @Nonnull ReplicationConfig replicationConfig,
+      long size,
       @Nullable FileEncryptionInfo encInfo,
       @Nonnull PrefixManager prefixManager,
       @Nullable OmBucketInfo omBucketInfo,
-        long transactionLogIndex) {
-    long objectID = OMFileRequest.getObjIDFromTxId(transactionLogIndex);
-
+      long transactionLogIndex, long objectID) {
     return new OmKeyInfo.Builder()
         .setVolumeName(keyArgs.getVolumeName())
         .setBucketName(keyArgs.getBucketName())
@@ -247,8 +262,7 @@ public abstract class OMKeyRequest extends OMClientRequest {
         .setCreationTime(keyArgs.getModificationTime())
         .setModificationTime(keyArgs.getModificationTime())
         .setDataSize(size)
-        .setReplicationType(type)
-        .setReplicationFactor(factor)
+        .setReplicationConfig(replicationConfig)
         .setFileEncryptionInfo(encInfo)
         .setAcls(getAclsForKey(keyArgs, omBucketInfo, prefixManager))
         .addAllMetadata(KeyValueUtil.getFromProtobuf(keyArgs.getMetadataList()))
@@ -257,7 +271,7 @@ public abstract class OMKeyRequest extends OMClientRequest {
         .build();
   }
 
-  private List< OzoneAcl > getAclsForKey(KeyArgs keyArgs,
+  protected List< OzoneAcl > getAclsForKey(KeyArgs keyArgs,
       OmBucketInfo bucketInfo, PrefixManager prefixManager) {
     List<OzoneAcl> acls = new ArrayList<>();
 
@@ -308,12 +322,14 @@ public abstract class OMKeyRequest extends OMClientRequest {
       @Nullable FileEncryptionInfo encInfo,
       @Nonnull PrefixManager prefixManager,
       @Nullable OmBucketInfo omBucketInfo,
-      long transactionLogIndex, boolean isRatisEnabled)
+      long transactionLogIndex,
+      @Nonnull long objectID,
+      boolean isRatisEnabled)
       throws IOException {
     if (keyArgs.getIsMultipartKey()) {
       return prepareMultipartKeyInfo(omMetadataManager, keyArgs,
           size, locations, encInfo, prefixManager, omBucketInfo,
-          transactionLogIndex);
+          transactionLogIndex, objectID);
       //TODO args.getMetadata
     }
     if (dbKeyInfo != null) {
@@ -333,9 +349,11 @@ public abstract class OMKeyRequest extends OMClientRequest {
 
     // the key does not exist, create a new object.
     // Blocks will be appended as version 0.
-    return createKeyInfo(keyArgs, locations, keyArgs.getFactor(),
-        keyArgs.getType(), keyArgs.getDataSize(), encInfo, prefixManager,
-        omBucketInfo, transactionLogIndex);
+    return createKeyInfo(keyArgs, locations,
+        ReplicationConfig.fromTypeAndFactor(
+                keyArgs.getType(), keyArgs.getFactor()),
+        keyArgs.getDataSize(), encInfo, prefixManager,
+        omBucketInfo, transactionLogIndex, objectID);
   }
 
   /**
@@ -350,10 +368,10 @@ public abstract class OMKeyRequest extends OMClientRequest {
       @Nonnull KeyArgs args, long size,
       @Nonnull List<OmKeyLocationInfo> locations,
       FileEncryptionInfo encInfo,  @Nonnull PrefixManager prefixManager,
-      @Nullable OmBucketInfo omBucketInfo, @Nonnull long transactionLogIndex)
+      @Nullable OmBucketInfo omBucketInfo, @Nonnull long transactionLogIndex,
+      @Nonnull long objectId)
       throws IOException {
-    HddsProtos.ReplicationFactor factor;
-    HddsProtos.ReplicationType type;
+
 
     Preconditions.checkArgument(args.getMultipartNumber() > 0,
         "PartNumber Should be greater than zero");
@@ -372,14 +390,12 @@ public abstract class OMKeyRequest extends OMClientRequest {
       throw new OMException("No such Multipart upload is with specified " +
           "uploadId " + uploadID,
           OMException.ResultCodes.NO_SUCH_MULTIPART_UPLOAD_ERROR);
-    } else {
-      factor = partKeyInfo.getFactor();
-      type = partKeyInfo.getType();
     }
     // For this upload part we don't need to check in KeyTable. As this
     // is not an actual key, it is a part of the key.
-    return createKeyInfo(args, locations, factor, type, size, encInfo,
-        prefixManager, omBucketInfo, transactionLogIndex);
+    return createKeyInfo(args, locations, partKeyInfo.getReplicationConfig(),
+        size, encInfo, prefixManager, omBucketInfo, transactionLogIndex,
+        objectId);
   }
 
   /**
@@ -418,6 +434,27 @@ public abstract class OMKeyRequest extends OMClientRequest {
     if (ozoneManager.getAclsEnabled()) {
       checkAcls(ozoneManager, resourceType, OzoneObj.StoreType.OZONE, aclType,
           volume, bucket, key);
+    }
+  }
+
+  /**
+   * Check Acls for the ozone key with volumeOwner.
+   * @param ozoneManager
+   * @param volume
+   * @param bucket
+   * @param key
+   * @param aclType
+   * @param resourceType
+   * @throws IOException
+   */
+  @SuppressWarnings("parameternumber")
+  protected void checkKeyAcls(OzoneManager ozoneManager, String volume,
+      String bucket, String key, IAccessAuthorizer.ACLType aclType,
+      OzoneObj.ResourceType resourceType, String volumeOwner)
+      throws IOException {
+    if (ozoneManager.getAclsEnabled()) {
+      checkAcls(ozoneManager, resourceType, OzoneObj.StoreType.OZONE, aclType,
+          volume, bucket, key, volumeOwner);
     }
   }
 
@@ -470,31 +507,64 @@ public abstract class OMKeyRequest extends OMClientRequest {
 
     // If KMS is not enabled, follow the normal approach of execution of not
     // reading DB in pre-execute.
+
+    OmBucketInfo bucketInfo = null;
     if (ozoneManager.getKmsProvider() != null) {
       try {
         acquireLock = omMetadataManager.getLock().acquireReadLock(
             BUCKET_LOCK, volumeName, bucketName);
 
-
-        OmBucketInfo bucketInfo = omMetadataManager.getBucketTable().get(
+        bucketInfo = omMetadataManager.getBucketTable().get(
             omMetadataManager.getBucketKey(volumeName, bucketName));
 
+      } finally {
+        if (acquireLock) {
+          omMetadataManager.getLock().releaseReadLock(
+              BUCKET_LOCK, volumeName, bucketName);
+        }
+      }
 
-        // Don't throw exception of bucket not found when bucketinfo is not
-        // null. If bucketinfo is null, later when request
-        // is submitted and if bucket does not really exist it will fail in
-        // applyTransaction step. Why we are doing this is if OM thinks it is
-        // the leader, but it is not, we don't want to fail request in this
-        // case. As anyway when it submits request to ratis it will fail with
-        // not leader exception, and client will retry on correct leader and
-        // request will be executed.
-        if (bucketInfo != null) {
-          Optional< FileEncryptionInfo > encryptionInfo =
-              getFileEncryptionInfo(ozoneManager, bucketInfo);
-          if (encryptionInfo.isPresent()) {
-            newKeyArgs.setFileEncryptionInfo(
-                OMPBHelper.convert(encryptionInfo.get()));
-          }
+      // Don't throw exception of bucket not found when bucketinfo is
+      // null. If bucketinfo is null, later when request
+      // is submitted and if bucket does not really exist it will fail in
+      // applyTransaction step. Why we are doing this is if OM thinks it is
+      // the leader, but it is not, we don't want to fail request in this
+      // case. As anyway when it submits request to ratis it will fail with
+      // not leader exception, and client will retry on correct leader and
+      // request will be executed.
+
+      if (bucketInfo != null) {
+        Optional<FileEncryptionInfo> encryptionInfo =
+            getFileEncryptionInfo(ozoneManager, bucketInfo);
+        if (encryptionInfo.isPresent()) {
+          newKeyArgs.setFileEncryptionInfo(
+              OMPBHelper.convert(encryptionInfo.get()));
+        }
+      }
+    }
+  }
+
+  protected void getFileEncryptionInfoForMpuKey(KeyArgs keyArgs,
+      KeyArgs.Builder newKeyArgs, OzoneManager ozoneManager)
+      throws IOException {
+
+    String volumeName = keyArgs.getVolumeName();
+    String bucketName = keyArgs.getBucketName();
+
+    boolean acquireLock = false;
+    OMMetadataManager omMetadataManager = ozoneManager.getMetadataManager();
+
+    if (ozoneManager.getKmsProvider() != null) {
+      acquireLock = omMetadataManager.getLock().acquireReadLock(
+          BUCKET_LOCK, volumeName, bucketName);
+      try {
+        OmKeyInfo omKeyInfo = omMetadataManager.getOpenKeyTable().get(
+            omMetadataManager.getMultipartKey(volumeName, bucketName,
+                keyArgs.getKeyName(), keyArgs.getMultipartUploadID()));
+
+        if (omKeyInfo != null && omKeyInfo.getFileEncryptionInfo() != null) {
+          newKeyArgs.setFileEncryptionInfo(
+              OMPBHelper.convert(omKeyInfo.getFileEncryptionInfo()));
         }
       } finally {
         if (acquireLock) {
@@ -516,5 +586,95 @@ public abstract class OMKeyRequest extends OMClientRequest {
       encryptionInfo = OMPBHelper.convert(keyArgs.getFileEncryptionInfo());
     }
     return encryptionInfo;
+  }
+
+  /**
+   * Check bucket quota in bytes.
+   * @param omBucketInfo
+   * @param allocateSize
+   * @throws IOException
+   */
+  protected void checkBucketQuotaInBytes(OmBucketInfo omBucketInfo,
+      long allocateSize) throws IOException {
+    if (omBucketInfo.getQuotaInBytes() > OzoneConsts.QUOTA_RESET) {
+      long usedBytes = omBucketInfo.getUsedBytes();
+      long quotaInBytes = omBucketInfo.getQuotaInBytes();
+      if (quotaInBytes - usedBytes < allocateSize) {
+        throw new OMException("The DiskSpace quota of bucket:"
+            + omBucketInfo.getBucketName() + "exceeded: quotaInBytes: "
+            + quotaInBytes + " Bytes but diskspace consumed: " + (usedBytes
+            + allocateSize) + " Bytes.",
+            OMException.ResultCodes.QUOTA_EXCEEDED);
+      }
+    }
+  }
+
+  /**
+   * Check namespace quota.
+   */
+  protected void checkBucketQuotaInNamespace(OmBucketInfo omBucketInfo,
+      long allocatedNamespace) throws IOException {
+    if (omBucketInfo.getQuotaInNamespace() > OzoneConsts.QUOTA_RESET) {
+      long usedNamespace = omBucketInfo.getUsedNamespace();
+      long quotaInNamespace = omBucketInfo.getQuotaInNamespace();
+      long toUseNamespaceInTotal = usedNamespace + allocatedNamespace;
+      if (quotaInNamespace < toUseNamespaceInTotal) {
+        throw new OMException("The namespace quota of Bucket:"
+            + omBucketInfo.getBucketName() + " exceeded: quotaInNamespace: "
+            + quotaInNamespace + " but namespace consumed: "
+            + toUseNamespaceInTotal + ".",
+            OMException.ResultCodes.QUOTA_EXCEEDED);
+      }
+    }
+  }
+
+  /**
+   * Check directory exists. If exists return true, else false.
+   * @param volumeName
+   * @param bucketName
+   * @param keyName
+   * @param omMetadataManager
+   * @throws IOException
+   */
+  protected boolean checkDirectoryAlreadyExists(String volumeName,
+      String bucketName, String keyName, OMMetadataManager omMetadataManager)
+      throws IOException {
+    if (omMetadataManager.getKeyTable().isExist(
+        omMetadataManager.getOzoneDirKey(volumeName, bucketName,
+            keyName))) {
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * @return the number of bytes used by blocks pointed to by {@code omKeyInfo}.
+   */
+  protected static long sumBlockLengths(OmKeyInfo omKeyInfo) {
+    long bytesUsed = 0;
+    int keyFactor = omKeyInfo.getReplicationConfig().getRequiredNodes();
+    OmKeyLocationInfoGroup keyLocationGroup =
+        omKeyInfo.getLatestVersionLocations();
+
+    for(OmKeyLocationInfo locationInfo: keyLocationGroup.getLocationList()) {
+      bytesUsed += locationInfo.getLength() * keyFactor;
+    }
+
+    return bytesUsed;
+  }
+
+  /**
+   * Return bucket info for the specified bucket.
+   * @param omMetadataManager
+   * @param volume
+   * @param bucket
+   * @return OmVolumeArgs
+   * @throws IOException
+   */
+  protected OmBucketInfo getBucketInfo(OMMetadataManager omMetadataManager,
+      String volume, String bucket) {
+    return omMetadataManager.getBucketTable().getCacheValue(
+        new CacheKey<>(omMetadataManager.getBucketKey(volume, bucket)))
+        .getCacheValue();
   }
 }

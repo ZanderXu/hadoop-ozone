@@ -19,19 +19,19 @@
 package org.apache.hadoop.ozone.recon.spi.impl;
 
 import static org.apache.hadoop.ozone.recon.ReconConstants.CONTAINER_COUNT_KEY;
-import static org.apache.hadoop.ozone.recon.ReconConstants.CONTAINER_KEY_COUNT_TABLE;
-import static org.apache.hadoop.ozone.recon.ReconConstants.CONTAINER_KEY_TABLE;
 import static org.apache.hadoop.ozone.recon.spi.impl.ReconContainerDBProvider.getNewDBStore;
-import static org.jooq.impl.DSL.currentTimestamp;
-import static org.jooq.impl.DSL.select;
-import static org.jooq.impl.DSL.using;
+import static org.apache.hadoop.ozone.recon.spi.impl.ReconDBDefinition.CONTAINER_KEY;
+import static org.apache.hadoop.ozone.recon.spi.impl.ReconDBDefinition.CONTAINER_KEY_COUNT;
+import static org.apache.hadoop.ozone.recon.spi.impl.ReconDBDefinition.REPLICA_HISTORY;
 
 import java.io.File;
 import java.io.IOException;
-import java.sql.Timestamp;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 import javax.inject.Inject;
 import javax.inject.Singleton;
@@ -39,10 +39,12 @@ import javax.inject.Singleton;
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.hadoop.hdds.conf.OzoneConfiguration;
+import org.apache.hadoop.hdds.utils.db.BatchOperation;
 import org.apache.hadoop.ozone.recon.ReconUtils;
 import org.apache.hadoop.ozone.recon.api.types.ContainerKeyPrefix;
 import org.apache.hadoop.ozone.recon.api.types.ContainerMetadata;
-import org.apache.hadoop.ozone.recon.persistence.ContainerSchemaManager;
+import org.apache.hadoop.ozone.recon.scm.ContainerReplicaHistory;
+import org.apache.hadoop.ozone.recon.scm.ContainerReplicaHistoryList;
 import org.apache.hadoop.ozone.recon.spi.ContainerDBServiceProvider;
 import org.apache.hadoop.hdds.utils.db.DBStore;
 import org.apache.hadoop.hdds.utils.db.Table;
@@ -50,7 +52,6 @@ import org.apache.hadoop.hdds.utils.db.Table.KeyValue;
 import org.apache.hadoop.hdds.utils.db.TableIterator;
 import org.hadoop.ozone.recon.schema.tables.daos.GlobalStatsDao;
 import org.hadoop.ozone.recon.schema.tables.pojos.GlobalStats;
-import org.hadoop.ozone.recon.schema.tables.pojos.MissingContainers;
 import org.jooq.Configuration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -67,10 +68,9 @@ public class ContainerDBServiceProviderImpl
 
   private Table<ContainerKeyPrefix, Integer> containerKeyTable;
   private Table<Long, Long> containerKeyCountTable;
+  private Table<Long, ContainerReplicaHistoryList>
+      containerReplicaHistoryTable;
   private GlobalStatsDao globalStatsDao;
-
-  @Inject
-  private ContainerSchemaManager containerSchemaManager;
 
   @Inject
   private OzoneConfiguration configuration;
@@ -80,9 +80,6 @@ public class ContainerDBServiceProviderImpl
 
   @Inject
   private Configuration sqlConfiguration;
-
-  @Inject
-  private ReconUtils reconUtils;
 
   @Inject
   public ContainerDBServiceProviderImpl(DBStore dbStore,
@@ -115,13 +112,19 @@ public class ContainerDBServiceProviderImpl
       throws IOException {
 
     File oldDBLocation = containerDbStore.getDbLocation();
-    containerDbStore = getNewDBStore(configuration, reconUtils);
+    try {
+      containerDbStore.close();
+    } catch (Exception e) {
+      LOG.warn("Unable to close old Recon container key DB at {}.",
+          containerDbStore.getDbLocation().getAbsolutePath());
+    }
+    containerDbStore = getNewDBStore(configuration);
     LOG.info("Creating new Recon Container DB at {}",
         containerDbStore.getDbLocation().getAbsolutePath());
     initializeTables();
 
     if (oldDBLocation.exists()) {
-      LOG.info("Cleaning up old Recon Container DB at {}.",
+      LOG.info("Cleaning up old Recon Container key DB at {}.",
           oldDBLocation.getAbsolutePath());
       FileUtils.deleteDirectory(oldDBLocation);
     }
@@ -142,10 +145,11 @@ public class ContainerDBServiceProviderImpl
    */
   private void initializeTables() {
     try {
-      this.containerKeyTable = containerDbStore.getTable(CONTAINER_KEY_TABLE,
-          ContainerKeyPrefix.class, Integer.class);
-      this.containerKeyCountTable = containerDbStore
-          .getTable(CONTAINER_KEY_COUNT_TABLE, Long.class, Long.class);
+      this.containerKeyTable = CONTAINER_KEY.getTable(containerDbStore);
+      this.containerKeyCountTable =
+          CONTAINER_KEY_COUNT.getTable(containerDbStore);
+      this.containerReplicaHistoryTable =
+          REPLICA_HISTORY.getTable(containerDbStore);
     } catch (IOException e) {
       LOG.error("Unable to create Container Key tables.", e);
     }
@@ -157,7 +161,7 @@ public class ContainerDBServiceProviderImpl
    *
    * @param containerKeyPrefix the containerID, key-prefix tuple.
    * @param count Count of the keys matching that prefix.
-   * @throws IOException
+   * @throws IOException on failure.
    */
   @Override
   public void storeContainerKeyMapping(ContainerKeyPrefix containerKeyPrefix,
@@ -171,7 +175,7 @@ public class ContainerDBServiceProviderImpl
    *
    * @param containerID the containerID.
    * @param count count of the keys within the given containerID.
-   * @throws IOException
+   * @throws IOException on failure.
    */
   @Override
   public void storeContainerKeyCount(Long containerID, Long count)
@@ -180,11 +184,60 @@ public class ContainerDBServiceProviderImpl
   }
 
   /**
+   * Store the ContainerID -> ContainerReplicaHistory (container first and last
+   * seen time) mapping to the container DB store.
+   *
+   * @param containerID the containerID.
+   * @param tsMap A map from Datanode UUID to ContainerReplicaHistory.
+   * @throws IOException
+   */
+  @Override
+  public void storeContainerReplicaHistory(Long containerID,
+      Map<UUID, ContainerReplicaHistory> tsMap) throws IOException {
+    List<ContainerReplicaHistory> tsList = new ArrayList<>();
+    for (Map.Entry<UUID, ContainerReplicaHistory> e : tsMap.entrySet()) {
+      tsList.add(e.getValue());
+    }
+
+    containerReplicaHistoryTable.put(containerID,
+        new ContainerReplicaHistoryList(tsList));
+  }
+
+  /**
+   * Batch version of storeContainerReplicaHistory.
+   *
+   * @param replicaHistoryMap Replica history map
+   * @throws IOException
+   */
+  @Override
+  public void batchStoreContainerReplicaHistory(
+      Map<Long, Map<UUID, ContainerReplicaHistory>> replicaHistoryMap)
+      throws IOException {
+    BatchOperation batchOperation = containerDbStore.initBatchOperation();
+
+    for (Map.Entry<Long, Map<UUID, ContainerReplicaHistory>> entry :
+        replicaHistoryMap.entrySet()) {
+      final long containerId = entry.getKey();
+      final Map<UUID, ContainerReplicaHistory> tsMap = entry.getValue();
+
+      List<ContainerReplicaHistory> tsList = new ArrayList<>();
+      for (Map.Entry<UUID, ContainerReplicaHistory> e : tsMap.entrySet()) {
+        tsList.add(e.getValue());
+      }
+
+      containerReplicaHistoryTable.putWithBatch(batchOperation, containerId,
+          new ContainerReplicaHistoryList(tsList));
+    }
+
+    containerDbStore.commitBatchOperation(batchOperation);
+  }
+
+  /**
    * Get the total count of keys within the given containerID.
    *
    * @param containerID the given containerID.
    * @return count of keys within the given containerID.
-   * @throws IOException
+   * @throws IOException on failure.
    */
   @Override
   public long getKeyCountForContainer(Long containerID) throws IOException {
@@ -193,11 +246,39 @@ public class ContainerDBServiceProviderImpl
   }
 
   /**
+   * Get the container replica history of the given containerID.
+   *
+   * @param containerID the given containerId.
+   * @return A map of ContainerReplicaWithTimestamp of the given containerID.
+   * @throws IOException
+   */
+  @Override
+  public Map<UUID, ContainerReplicaHistory> getContainerReplicaHistory(
+      Long containerID) throws IOException {
+
+    final ContainerReplicaHistoryList tsList =
+        containerReplicaHistoryTable.get(containerID);
+    if (tsList == null) {
+      // DB doesn't have an existing entry for the containerID, return empty map
+      return new HashMap<>();
+    }
+
+    Map<UUID, ContainerReplicaHistory> res = new HashMap<>();
+    // Populate result map with entries from the DB.
+    // The list should be fairly short (< 10 entries).
+    for (ContainerReplicaHistory ts : tsList.getList()) {
+      final UUID uuid = ts.getUuid();
+      res.put(uuid, ts);
+    }
+    return res;
+  }
+
+  /**
    * Get if a containerID exists or not.
    *
    * @param containerID the given containerID.
    * @return if the given ContainerID exists or not.
-   * @throws IOException
+   * @throws IOException on failure.
    */
   @Override
   public boolean doesContainerExists(Long containerID) throws IOException {
@@ -210,7 +291,7 @@ public class ContainerDBServiceProviderImpl
    *
    * @param containerKeyPrefix the containerID, key-prefix tuple.
    * @return count of keys matching the containerID, key-prefix.
-   * @throws IOException
+   * @throws IOException on failure.
    */
   @Override
   public Integer getCountForContainerKeyPrefix(
@@ -310,7 +391,7 @@ public class ContainerDBServiceProviderImpl
    * @param prevContainer containerID after which the
    *                      list of containers are scanned.
    * @return Map of containerID -> containerMetadata.
-   * @throws IOException
+   * @throws IOException on failure.
    */
   @Override
   public Map<Long, ContainerMetadata> getContainers(int limit,
@@ -358,10 +439,6 @@ public class ContainerDBServiceProviderImpl
     return containers;
   }
 
-  public List<MissingContainers> getMissingContainers() {
-    return containerSchemaManager.getAllMissingContainers();
-  }
-
   @Override
   public void deleteContainerMapping(ContainerKeyPrefix containerKeyPrefix)
       throws IOException {
@@ -394,20 +471,8 @@ public class ContainerDBServiceProviderImpl
    */
   @Override
   public void storeContainerCount(Long count) {
-    // Get the current timestamp
-    Timestamp now =
-        using(sqlConfiguration).fetchValue(select(currentTimestamp()));
-    GlobalStats containerCountRecord =
-        globalStatsDao.fetchOneByKey(CONTAINER_COUNT_KEY);
-    GlobalStats globalStatsRecord =
-        new GlobalStats(CONTAINER_COUNT_KEY, count, now);
-
-    // Insert a new record for CONTAINER_COUNT_KEY if it does not exist
-    if (containerCountRecord == null) {
-      globalStatsDao.insert(globalStatsRecord);
-    } else {
-      globalStatsDao.update(globalStatsRecord);
-    }
+    ReconUtils.upsertGlobalStatsTable(sqlConfiguration, globalStatsDao,
+        CONTAINER_COUNT_KEY, count);
   }
 
   /**

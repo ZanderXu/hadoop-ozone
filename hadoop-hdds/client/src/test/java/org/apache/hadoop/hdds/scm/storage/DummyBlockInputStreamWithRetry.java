@@ -24,9 +24,10 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.apache.hadoop.hdds.client.BlockID;
+import org.apache.hadoop.hdds.client.StandaloneReplicationConfig;
 import org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos.ChunkInfo;
-import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
-import org.apache.hadoop.hdds.scm.XceiverClientManager;
+import org.apache.hadoop.hdds.protocol.proto.HddsProtos.ReplicationFactor;
+import org.apache.hadoop.hdds.scm.XceiverClientFactory;
 import org.apache.hadoop.hdds.scm.container.ContainerNotFoundException;
 import org.apache.hadoop.hdds.scm.pipeline.Pipeline;
 import org.apache.hadoop.hdds.scm.pipeline.PipelineID;
@@ -49,7 +50,7 @@ final class DummyBlockInputStreamWithRetry
       Pipeline pipeline,
       Token<OzoneBlockTokenIdentifier> token,
       boolean verifyChecksum,
-      XceiverClientManager xceiverClientManager,
+      XceiverClientFactory xceiverClientManager,
       List<ChunkInfo> chunkList,
       Map<String, byte[]> chunkMap,
       AtomicBoolean isRerfreshed) {
@@ -59,8 +60,8 @@ final class DummyBlockInputStreamWithRetry
           return Pipeline.newBuilder()
               .setState(Pipeline.PipelineState.OPEN)
               .setId(PipelineID.randomId())
-              .setType(HddsProtos.ReplicationType.STAND_ALONE)
-              .setFactor(HddsProtos.ReplicationFactor.ONE)
+              .setReplicationConfig(new StandaloneReplicationConfig(
+                  ReplicationFactor.ONE))
               .setNodes(Collections.emptyList())
               .build();
         }, chunkList, chunkMap);

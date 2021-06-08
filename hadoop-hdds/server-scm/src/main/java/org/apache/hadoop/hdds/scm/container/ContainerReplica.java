@@ -17,37 +17,41 @@
 
 package org.apache.hadoop.hdds.scm.container;
 
+import java.util.Optional;
+import java.util.UUID;
+
+import org.apache.hadoop.hdds.protocol.DatanodeDetails;
+import org.apache.hadoop.hdds.protocol.proto.StorageContainerDatanodeProtocolProtos.ContainerReplicaProto;
+
 import com.google.common.base.Preconditions;
 import org.apache.commons.lang3.builder.CompareToBuilder;
 import org.apache.commons.lang3.builder.EqualsBuilder;
 import org.apache.commons.lang3.builder.HashCodeBuilder;
-import org.apache.hadoop.hdds.protocol.DatanodeDetails;
-import org.apache.hadoop.hdds.protocol.proto
-    .StorageContainerDatanodeProtocolProtos.ContainerReplicaProto;
-
-import java.util.Optional;
-import java.util.UUID;
 
 /**
  * In-memory state of a container replica.
  */
 public final class ContainerReplica implements Comparable<ContainerReplica> {
 
-  final private ContainerID containerID;
-  final private ContainerReplicaProto.State state;
-  final private DatanodeDetails datanodeDetails;
-  final private UUID placeOfBirth;
+  private final ContainerID containerID;
+  private final ContainerReplicaProto.State state;
+  private final DatanodeDetails datanodeDetails;
+  private final UUID placeOfBirth;
 
   private Long sequenceId;
+  private final long keyCount;
+  private final long bytesUsed;
 
 
   private ContainerReplica(final ContainerID containerID,
       final ContainerReplicaProto.State state, final DatanodeDetails datanode,
-      final UUID originNodeId) {
+      final UUID originNodeId, long keyNum, long dataSize) {
     this.containerID = containerID;
     this.state = state;
     this.datanodeDetails = datanode;
     this.placeOfBirth = originNodeId;
+    this.keyCount = keyNum;
+    this.bytesUsed = dataSize;
   }
 
   private void setSequenceId(Long seqId) {
@@ -88,6 +92,24 @@ public final class ContainerReplica implements Comparable<ContainerReplica> {
    */
   public Long getSequenceId() {
     return sequenceId;
+  }
+
+  /**
+   * Returns the key count of of this replica.
+   *
+   * @return Key count
+   */
+  public long getKeyCount() {
+    return keyCount;
+  }
+
+  /**
+   * Returns the data size of this replica.
+   *
+   * @return Data size
+   */
+  public long getBytesUsed() {
+    return bytesUsed;
   }
 
   @Override
@@ -138,9 +160,12 @@ public final class ContainerReplica implements Comparable<ContainerReplica> {
   public String toString() {
     return "ContainerReplica{" +
         "containerID=" + containerID +
+        ", state=" + state +
         ", datanodeDetails=" + datanodeDetails +
         ", placeOfBirth=" + placeOfBirth +
         ", sequenceId=" + sequenceId +
+        ", keyCount=" + keyCount +
+        ", bytesUsed=" + bytesUsed +
         '}';
   }
 
@@ -154,6 +179,8 @@ public final class ContainerReplica implements Comparable<ContainerReplica> {
     private DatanodeDetails datanode;
     private UUID placeOfBirth;
     private Long sequenceId;
+    private long bytesUsed;
+    private long keyCount;
 
     /**
      * Set Container Id.
@@ -207,6 +234,16 @@ public final class ContainerReplica implements Comparable<ContainerReplica> {
       return this;
     }
 
+    public ContainerReplicaBuilder setKeyCount(long count) {
+      keyCount = count;
+      return this;
+    }
+
+    public ContainerReplicaBuilder setBytesUsed(long used) {
+      bytesUsed = used;
+      return this;
+    }
+
     /**
      * Constructs new ContainerReplicaBuilder.
      *
@@ -221,11 +258,10 @@ public final class ContainerReplica implements Comparable<ContainerReplica> {
           "DatanodeDetails can't be null");
       ContainerReplica replica = new ContainerReplica(
           containerID, state, datanode,
-          Optional.ofNullable(placeOfBirth).orElse(datanode.getUuid()));
+          Optional.ofNullable(placeOfBirth).orElse(datanode.getUuid()),
+          keyCount, bytesUsed);
       Optional.ofNullable(sequenceId).ifPresent(replica::setSequenceId);
       return replica;
     }
   }
-
-
 }

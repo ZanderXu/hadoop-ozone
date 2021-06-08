@@ -17,7 +17,6 @@
  */
 package org.apache.hadoop.hdds.conf;
 
-import javax.annotation.PostConstruct;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -27,7 +26,7 @@ import java.util.concurrent.TimeUnit;
 public class SimpleConfiguration extends SimpleConfigurationParent {
 
   @Config(key = "address", defaultValue = "localhost", description = "Client "
-      + "addres (To test string injection).", tags = ConfigTag.MANAGEMENT)
+      + "address (To test string injection).", tags = ConfigTag.MANAGEMENT)
   private String clientAddress;
 
   @Config(key = "bind.host", defaultValue = "0.0.0.0", description = "Bind "
@@ -46,12 +45,17 @@ public class SimpleConfiguration extends SimpleConfigurationParent {
   @Config(key = "wait", type = ConfigType.TIME, timeUnit =
       TimeUnit.SECONDS, defaultValue = "30m", description = "Wait time (To "
       + "test TIME config type)", tags = ConfigTag.MANAGEMENT)
-  private long waitTime = 1;
+  private long waitTime;
+
+  @Config(key = "class", type = ConfigType.CLASS,
+      defaultValue = "java.lang.Object", description = "",
+      tags = ConfigTag.OZONE)
+  private Class<?> myClass = Object.class;
 
   @PostConstruct
   public void validate() {
     if (port < 0) {
-      throw new NumberFormatException("Please use a postitive port number");
+      throw new NumberFormatException("Please use a positive port number");
     }
   }
 
@@ -93,5 +97,13 @@ public class SimpleConfiguration extends SimpleConfigurationParent {
 
   public long getWaitTime() {
     return waitTime;
+  }
+
+  public Class<?> getMyClass() {
+    return myClass;
+  }
+
+  public void setMyClass(Class<?> aClass) {
+    this.myClass = aClass;
   }
 }

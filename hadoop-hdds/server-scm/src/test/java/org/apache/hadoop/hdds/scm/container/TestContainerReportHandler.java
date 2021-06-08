@@ -20,7 +20,6 @@ import org.apache.hadoop.hdds.conf.ConfigurationSource;
 import org.apache.hadoop.hdds.conf.OzoneConfiguration;
 import org.apache.hadoop.hdds.protocol.DatanodeDetails;
 import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
-import org.apache.hadoop.hdds.protocol.proto.HddsProtos.NodeState;
 import org.apache.hadoop.hdds.protocol.proto.HddsProtos.LifeCycleState;
 import org.apache.hadoop.hdds.protocol.proto
     .StorageContainerDatanodeProtocolProtos.ContainerReportsProto;
@@ -28,10 +27,12 @@ import org.apache.hadoop.hdds.protocol.proto
     .StorageContainerDatanodeProtocolProtos.ContainerReplicaProto;
 import org.apache.hadoop.hdds.scm.exceptions.SCMException;
 import org.apache.hadoop.hdds.scm.node.NodeManager;
+import org.apache.hadoop.hdds.scm.node.NodeStatus;
 import org.apache.hadoop.hdds.scm.node.states.NodeNotFoundException;
 import org.apache.hadoop.hdds.scm.server
     .SCMDatanodeHeartbeatDispatcher.ContainerReportFromDatanode;
 import org.apache.hadoop.hdds.server.events.EventPublisher;
+import org.apache.hadoop.ozone.common.statemachine.InvalidStateTransitionException;
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
@@ -44,6 +45,7 @@ import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+import static junit.framework.TestCase.assertEquals;
 import static org.apache.hadoop.hdds.scm.TestUtils.getReplicas;
 import static org.apache.hadoop.hdds.scm.TestUtils.getContainer;
 
@@ -53,15 +55,15 @@ import static org.apache.hadoop.hdds.scm.TestUtils.getContainer;
 public class TestContainerReportHandler {
 
   private NodeManager nodeManager;
-  private ContainerManager containerManager;
+  private ContainerManagerV2 containerManager;
   private ContainerStateManager containerStateManager;
   private EventPublisher publisher;
 
   @Before
-  public void setup() throws IOException {
+  public void setup() throws IOException, InvalidStateTransitionException {
     final ConfigurationSource conf = new OzoneConfiguration();
     this.nodeManager = new MockNodeManager(true, 10);
-    this.containerManager = Mockito.mock(ContainerManager.class);
+    this.containerManager = Mockito.mock(ContainerManagerV2.class);
     this.containerStateManager = new ContainerStateManager(conf);
     this.publisher = Mockito.mock(EventPublisher.class);
 
@@ -114,7 +116,7 @@ public class TestContainerReportHandler {
     final ContainerReportHandler reportHandler = new ContainerReportHandler(
         nodeManager, containerManager);
     final Iterator<DatanodeDetails> nodeIterator = nodeManager.getNodes(
-        NodeState.HEALTHY).iterator();
+        NodeStatus.inServiceHealthy()).iterator();
     final DatanodeDetails datanodeOne = nodeIterator.next();
     final DatanodeDetails datanodeTwo = nodeIterator.next();
     final DatanodeDetails datanodeThree = nodeIterator.next();
@@ -183,7 +185,7 @@ public class TestContainerReportHandler {
         nodeManager, containerManager);
 
     final Iterator<DatanodeDetails> nodeIterator = nodeManager.getNodes(
-        NodeState.HEALTHY).iterator();
+        NodeStatus.inServiceHealthy()).iterator();
     final DatanodeDetails datanodeOne = nodeIterator.next();
     final DatanodeDetails datanodeTwo = nodeIterator.next();
     final DatanodeDetails datanodeThree = nodeIterator.next();
@@ -262,7 +264,7 @@ public class TestContainerReportHandler {
         nodeManager, containerManager);
 
     final Iterator<DatanodeDetails> nodeIterator = nodeManager.getNodes(
-        NodeState.HEALTHY).iterator();
+        NodeStatus.inServiceHealthy()).iterator();
     final DatanodeDetails datanodeOne = nodeIterator.next();
     final DatanodeDetails datanodeTwo = nodeIterator.next();
     final DatanodeDetails datanodeThree = nodeIterator.next();
@@ -341,7 +343,7 @@ public class TestContainerReportHandler {
         nodeManager, containerManager);
 
     final Iterator<DatanodeDetails> nodeIterator = nodeManager.getNodes(
-        NodeState.HEALTHY).iterator();
+        NodeStatus.inServiceHealthy()).iterator();
     final DatanodeDetails datanodeOne = nodeIterator.next();
     final DatanodeDetails datanodeTwo = nodeIterator.next();
     final DatanodeDetails datanodeThree = nodeIterator.next();
@@ -418,7 +420,7 @@ public class TestContainerReportHandler {
     final ContainerReportHandler reportHandler = new ContainerReportHandler(
         nodeManager, containerManager);
     final Iterator<DatanodeDetails> nodeIterator = nodeManager.getNodes(
-        NodeState.HEALTHY).iterator();
+        NodeStatus.inServiceHealthy()).iterator();
 
     final DatanodeDetails datanodeOne = nodeIterator.next();
     final DatanodeDetails datanodeTwo = nodeIterator.next();
@@ -483,9 +485,194 @@ public class TestContainerReportHandler {
     Assert.assertEquals(LifeCycleState.CLOSED, containerOne.getState());
   }
 
-  private static ContainerReportsProto getContainerReportsProto(
+  @Test
+  public void openContainerKeyAndBytesUsedUpdatedToMinimumOfAllReplicas()
+      throws SCMException {
+    final ContainerReportHandler reportHandler = new ContainerReportHandler(
+        nodeManager, containerManager);
+    final Iterator<DatanodeDetails> nodeIterator = nodeManager.getNodes(
+        NodeStatus.inServiceHealthy()).iterator();
+
+    final DatanodeDetails datanodeOne = nodeIterator.next();
+    final DatanodeDetails datanodeTwo = nodeIterator.next();
+    final DatanodeDetails datanodeThree = nodeIterator.next();
+
+    final ContainerReplicaProto.State replicaState
+        = ContainerReplicaProto.State.OPEN;
+    final ContainerInfo containerOne = getContainer(LifeCycleState.OPEN);
+
+    containerStateManager.loadContainer(containerOne);
+    // Container loaded, no replicas reported from DNs. Expect zeros for
+    // usage values.
+    assertEquals(0L, containerOne.getUsedBytes());
+    assertEquals(0L, containerOne.getNumberOfKeys());
+
+    reportHandler.onMessage(getContainerReportFromDatanode(
+        containerOne.containerID(), replicaState,
+        datanodeOne, 50L, 60L), publisher);
+
+    // Single replica reported - ensure values are updated
+    assertEquals(50L, containerOne.getUsedBytes());
+    assertEquals(60L, containerOne.getNumberOfKeys());
+
+    reportHandler.onMessage(getContainerReportFromDatanode(
+        containerOne.containerID(), replicaState,
+        datanodeTwo, 50L, 60L), publisher);
+    reportHandler.onMessage(getContainerReportFromDatanode(
+        containerOne.containerID(), replicaState,
+        datanodeThree, 50L, 60L), publisher);
+
+    // All 3 DNs are reporting the same values. Counts should be as expected.
+    assertEquals(50L, containerOne.getUsedBytes());
+    assertEquals(60L, containerOne.getNumberOfKeys());
+
+    // Now each DN reports a different lesser value. Counts should be the min
+    // reported.
+    reportHandler.onMessage(getContainerReportFromDatanode(
+        containerOne.containerID(), replicaState,
+        datanodeOne, 1L, 10L), publisher);
+    reportHandler.onMessage(getContainerReportFromDatanode(
+        containerOne.containerID(), replicaState,
+        datanodeTwo, 2L, 11L), publisher);
+    reportHandler.onMessage(getContainerReportFromDatanode(
+        containerOne.containerID(), replicaState,
+        datanodeThree, 3L, 12L), publisher);
+
+    // All 3 DNs are reporting different values. The actual value should be the
+    // minimum.
+    assertEquals(1L, containerOne.getUsedBytes());
+    assertEquals(10L, containerOne.getNumberOfKeys());
+
+    // Have the lowest value report a higher value and ensure the new value
+    // is the minimum
+    reportHandler.onMessage(getContainerReportFromDatanode(
+        containerOne.containerID(), replicaState,
+        datanodeOne, 3L, 12L), publisher);
+
+    assertEquals(2L, containerOne.getUsedBytes());
+    assertEquals(11L, containerOne.getNumberOfKeys());
+  }
+
+  @Test
+  public void notOpenContainerKeyAndBytesUsedUpdatedToMaximumOfAllReplicas()
+      throws SCMException {
+    final ContainerReportHandler reportHandler = new ContainerReportHandler(
+        nodeManager, containerManager);
+    final Iterator<DatanodeDetails> nodeIterator = nodeManager.getNodes(
+        NodeStatus.inServiceHealthy()).iterator();
+
+    final DatanodeDetails datanodeOne = nodeIterator.next();
+    final DatanodeDetails datanodeTwo = nodeIterator.next();
+    final DatanodeDetails datanodeThree = nodeIterator.next();
+
+    final ContainerReplicaProto.State replicaState
+        = ContainerReplicaProto.State.CLOSED;
+    final ContainerInfo containerOne = getContainer(LifeCycleState.CLOSED);
+
+    containerStateManager.loadContainer(containerOne);
+    // Container loaded, no replicas reported from DNs. Expect zeros for
+    // usage values.
+    assertEquals(0L, containerOne.getUsedBytes());
+    assertEquals(0L, containerOne.getNumberOfKeys());
+
+    reportHandler.onMessage(getContainerReportFromDatanode(
+        containerOne.containerID(), replicaState,
+        datanodeOne, 50L, 60L), publisher);
+
+    // Single replica reported - ensure values are updated
+    assertEquals(50L, containerOne.getUsedBytes());
+    assertEquals(60L, containerOne.getNumberOfKeys());
+
+    reportHandler.onMessage(getContainerReportFromDatanode(
+        containerOne.containerID(), replicaState,
+        datanodeTwo, 50L, 60L), publisher);
+    reportHandler.onMessage(getContainerReportFromDatanode(
+        containerOne.containerID(), replicaState,
+        datanodeThree, 50L, 60L), publisher);
+
+    // All 3 DNs are reporting the same values. Counts should be as expected.
+    assertEquals(50L, containerOne.getUsedBytes());
+    assertEquals(60L, containerOne.getNumberOfKeys());
+
+    // Now each DN reports a different lesser value. Counts should be the max
+    // reported.
+    reportHandler.onMessage(getContainerReportFromDatanode(
+        containerOne.containerID(), replicaState,
+        datanodeOne, 1L, 10L), publisher);
+    reportHandler.onMessage(getContainerReportFromDatanode(
+        containerOne.containerID(), replicaState,
+        datanodeTwo, 2L, 11L), publisher);
+    reportHandler.onMessage(getContainerReportFromDatanode(
+        containerOne.containerID(), replicaState,
+        datanodeThree, 3L, 12L), publisher);
+
+    // All 3 DNs are reporting different values. The actual value should be the
+    // maximum.
+    assertEquals(3L, containerOne.getUsedBytes());
+    assertEquals(12L, containerOne.getNumberOfKeys());
+
+    // Have the highest value report a lower value and ensure the new value
+    // is the new maximumu
+    reportHandler.onMessage(getContainerReportFromDatanode(
+        containerOne.containerID(), replicaState,
+        datanodeThree, 1L, 10L), publisher);
+
+    assertEquals(2L, containerOne.getUsedBytes());
+    assertEquals(11L, containerOne.getNumberOfKeys());
+  }
+
+  @Test
+  public void testStaleReplicaOfDeletedContainer() throws NodeNotFoundException,
+      SCMException, ContainerNotFoundException {
+
+    final ContainerReportHandler reportHandler = new ContainerReportHandler(
+        nodeManager, containerManager);
+
+    final Iterator<DatanodeDetails> nodeIterator = nodeManager.getNodes(
+        NodeStatus.inServiceHealthy()).iterator();
+    final DatanodeDetails datanodeOne = nodeIterator.next();
+    final ContainerInfo containerOne = getContainer(LifeCycleState.DELETED);
+
+    final Set<ContainerID> containerIDSet = Stream.of(
+        containerOne.containerID())
+        .collect(Collectors.toSet());
+
+    nodeManager.setContainers(datanodeOne, containerIDSet);
+    containerStateManager.loadContainer(containerOne);
+
+    // Expects the replica will be deleted.
+    final ContainerReportsProto containerReport = getContainerReportsProto(
+        containerOne.containerID(), ContainerReplicaProto.State.CLOSED,
+        datanodeOne.getUuidString());
+    final ContainerReportFromDatanode containerReportFromDatanode =
+        new ContainerReportFromDatanode(datanodeOne, containerReport);
+    reportHandler.onMessage(containerReportFromDatanode, publisher);
+
+    Mockito.verify(publisher, Mockito.times(1));
+
+    Assert.assertEquals(0, containerManager.getContainerReplicas(
+        containerOne.containerID()).size());
+  }
+
+  private ContainerReportFromDatanode getContainerReportFromDatanode(
+      ContainerID containerId, ContainerReplicaProto.State state,
+      DatanodeDetails dn, long bytesUsed, long keyCount) {
+    ContainerReportsProto containerReport = getContainerReportsProto(
+        containerId, state, dn.getUuidString(), bytesUsed, keyCount);
+
+    return new ContainerReportFromDatanode(dn, containerReport);
+  }
+
+  protected static ContainerReportsProto getContainerReportsProto(
       final ContainerID containerId, final ContainerReplicaProto.State state,
       final String originNodeId) {
+    return getContainerReportsProto(containerId, state, originNodeId,
+        2000000000L, 100000000L);
+  }
+
+  protected static ContainerReportsProto getContainerReportsProto(
+      final ContainerID containerId, final ContainerReplicaProto.State state,
+      final String originNodeId, final long usedBytes, final long keyCount) {
     final ContainerReportsProto.Builder crBuilder =
         ContainerReportsProto.newBuilder();
     final ContainerReplicaProto replicaProto =
@@ -495,8 +682,8 @@ public class TestContainerReportHandler {
             .setOriginNodeId(originNodeId)
             .setFinalhash("e16cc9d6024365750ed8dbd194ea46d2")
             .setSize(5368709120L)
-            .setUsed(2000000000L)
-            .setKeyCount(100000000L)
+            .setUsed(usedBytes)
+            .setKeyCount(keyCount)
             .setReadCount(100000000L)
             .setWriteCount(100000000L)
             .setReadBytes(2000000000L)

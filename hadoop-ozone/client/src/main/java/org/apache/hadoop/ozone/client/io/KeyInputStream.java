@@ -17,35 +17,43 @@
  */
 package org.apache.hadoop.ozone.client.io;
 
-import com.google.common.annotations.VisibleForTesting;
-
-import org.apache.commons.collections.CollectionUtils;
-import org.apache.commons.io.IOUtils;
-import org.apache.hadoop.fs.FSExceptionMessages;
-import org.apache.hadoop.fs.Seekable;
-import org.apache.hadoop.hdds.client.BlockID;
-import org.apache.hadoop.hdds.scm.XceiverClientManager;
-import org.apache.hadoop.hdds.scm.pipeline.Pipeline;
-import org.apache.hadoop.hdds.scm.storage.BlockInputStream;
-import org.apache.hadoop.ozone.om.helpers.OmKeyInfo;
-import org.apache.hadoop.ozone.om.helpers.OmKeyLocationInfo;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.OutputStream;
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.function.Function;
 import java.util.stream.Collectors;
+
+import com.google.common.base.Preconditions;
+import org.apache.hadoop.fs.ByteBufferReadable;
+import org.apache.hadoop.fs.CanUnbuffer;
+import org.apache.hadoop.fs.FSExceptionMessages;
+import org.apache.hadoop.fs.Seekable;
+import org.apache.hadoop.hdds.client.BlockID;
+import org.apache.hadoop.hdds.scm.XceiverClientFactory;
+import org.apache.hadoop.hdds.scm.pipeline.Pipeline;
+import org.apache.hadoop.hdds.scm.storage.BlockInputStream;
+import org.apache.hadoop.hdds.scm.storage.ByteArrayReader;
+import org.apache.hadoop.hdds.scm.storage.ByteBufferReader;
+import org.apache.hadoop.hdds.scm.storage.ByteReaderStrategy;
+import org.apache.hadoop.ozone.om.helpers.OmKeyInfo;
+import org.apache.hadoop.ozone.om.helpers.OmKeyLocationInfo;
+
+import com.google.common.annotations.VisibleForTesting;
+import org.apache.commons.collections.CollectionUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Maintaining a list of BlockInputStream. Read based on offset.
  */
-public class KeyInputStream extends InputStream implements Seekable {
+public class KeyInputStream extends InputStream
+    implements Seekable, CanUnbuffer, ByteBufferReadable {
 
   private static final Logger LOG =
       LoggerFactory.getLogger(KeyInputStream.class);
@@ -84,21 +92,62 @@ public class KeyInputStream extends InputStream implements Seekable {
    * For each block in keyInfo, add a BlockInputStream to blockStreams.
    */
   public static LengthInputStream getFromOmKeyInfo(OmKeyInfo keyInfo,
-      XceiverClientManager xceiverClientManager,
+      XceiverClientFactory xceiverClientFactory,
       boolean verifyChecksum,  Function<OmKeyInfo, OmKeyInfo> retryFunction) {
     List<OmKeyLocationInfo> keyLocationInfos = keyInfo
         .getLatestVersionLocations().getBlocksLatestVersionOnly();
 
     KeyInputStream keyInputStream = new KeyInputStream();
     keyInputStream.initialize(keyInfo, keyLocationInfos,
-        xceiverClientManager, verifyChecksum, retryFunction);
+        xceiverClientFactory, verifyChecksum, retryFunction);
 
     return new LengthInputStream(keyInputStream, keyInputStream.length);
   }
 
+  public static List<LengthInputStream> getStreamsFromKeyInfo(OmKeyInfo keyInfo,
+      XceiverClientFactory xceiverClientFactory, boolean verifyChecksum,
+      Function<OmKeyInfo, OmKeyInfo> retryFunction) {
+    List<OmKeyLocationInfo> keyLocationInfos = keyInfo
+        .getLatestVersionLocations().getBlocksLatestVersionOnly();
+
+    List<LengthInputStream> lengthInputStreams = new ArrayList<>();
+
+    // Iterate through each block info in keyLocationInfos and assign it the
+    // corresponding part in the partsToBlockMap. Also increment each part's
+    // length accordingly.
+    Map<Integer, List<OmKeyLocationInfo>> partsToBlocksMap = new HashMap<>();
+    Map<Integer, Long> partsLengthMap = new HashMap<>();
+
+    for (OmKeyLocationInfo omKeyLocationInfo: keyLocationInfos) {
+      int partNumber = omKeyLocationInfo.getPartNumber();
+
+      if (!partsToBlocksMap.containsKey(partNumber)) {
+        partsToBlocksMap.put(partNumber, new ArrayList<>());
+        partsLengthMap.put(partNumber, 0L);
+      }
+      // Add Block to corresponding partNumber in partsToBlocksMap
+      partsToBlocksMap.get(partNumber).add(omKeyLocationInfo);
+      // Update the part length
+      partsLengthMap.put(partNumber,
+          partsLengthMap.get(partNumber) + omKeyLocationInfo.getLength());
+    }
+
+    // Create a KeyInputStream for each part.
+    for (Map.Entry<Integer, List<OmKeyLocationInfo>> entry :
+        partsToBlocksMap.entrySet()) {
+      KeyInputStream keyInputStream = new KeyInputStream();
+      keyInputStream.initialize(keyInfo, entry.getValue(),
+          xceiverClientFactory, verifyChecksum, retryFunction);
+      lengthInputStreams.add(new LengthInputStream(keyInputStream,
+          partsLengthMap.get(entry.getKey())));
+    }
+
+    return lengthInputStreams;
+  }
+
   private synchronized void initialize(OmKeyInfo keyInfo,
       List<OmKeyLocationInfo> blockInfos,
-      XceiverClientManager xceiverClientManager,
+      XceiverClientFactory xceiverClientFactory,
       boolean verifyChecksum,  Function<OmKeyInfo, OmKeyInfo> retryFunction) {
     this.key = keyInfo.getKeyName();
     this.blockOffsets = new long[blockInfos.size()];
@@ -112,7 +161,7 @@ public class KeyInputStream extends InputStream implements Seekable {
 
       // We also pass in functional reference which is used to refresh the
       // pipeline info for a given OM Key location info.
-      addStream(omKeyLocationInfo, xceiverClientManager,
+      addStream(omKeyLocationInfo, xceiverClientFactory,
           verifyChecksum, keyLocationInfo -> {
             OmKeyInfo newKeyInfo = retryFunction.apply(keyInfo);
             BlockID blockID = keyLocationInfo.getBlockID();
@@ -142,12 +191,12 @@ public class KeyInputStream extends InputStream implements Seekable {
    * the block for the first time.
    */
   private synchronized void addStream(OmKeyLocationInfo blockInfo,
-      XceiverClientManager xceiverClientMngr,
+      XceiverClientFactory xceiverClientFactory,
       boolean verifyChecksum,
       Function<OmKeyLocationInfo, Pipeline> refreshPipelineFunction) {
     blockStreams.add(new BlockInputStream(blockInfo.getBlockID(),
         blockInfo.getLength(), blockInfo.getPipeline(), blockInfo.getToken(),
-        verifyChecksum, xceiverClientMngr,
+        verifyChecksum, xceiverClientFactory,
         blockID -> refreshPipelineFunction.apply(blockInfo)));
   }
 
@@ -173,18 +222,32 @@ public class KeyInputStream extends InputStream implements Seekable {
    */
   @Override
   public synchronized int read(byte[] b, int off, int len) throws IOException {
-    checkOpen();
-    if (b == null) {
-      throw new NullPointerException();
-    }
-    if (off < 0 || len < 0 || len > b.length - off) {
-      throw new IndexOutOfBoundsException();
-    }
-    if (len == 0) {
+    ByteReaderStrategy strategy = new ByteArrayReader(b, off, len);
+    int bufferLen = strategy.getTargetLength();
+    if (bufferLen == 0) {
       return 0;
     }
+    return readWithStrategy(strategy);
+  }
+
+  @Override
+  public synchronized int read(ByteBuffer byteBuffer) throws IOException {
+    ByteReaderStrategy strategy = new ByteBufferReader(byteBuffer);
+    int bufferLen = strategy.getTargetLength();
+    if (bufferLen == 0) {
+      return 0;
+    }
+    return readWithStrategy(strategy);
+  }
+
+  synchronized int readWithStrategy(ByteReaderStrategy strategy) throws
+      IOException {
+    Preconditions.checkArgument(strategy != null);
+    checkOpen();
+
+    int buffLen = strategy.getTargetLength();
     int totalReadLen = 0;
-    while (len > 0) {
+    while (buffLen > 0) {
       // if we are at the last block and have read the entire block, return
       if (blockStreams.size() == 0 ||
           (blockStreams.size() - 1 <= blockIndex &&
@@ -195,20 +258,19 @@ public class KeyInputStream extends InputStream implements Seekable {
 
       // Get the current blockStream and read data from it
       BlockInputStream current = blockStreams.get(blockIndex);
-      int numBytesToRead = Math.min(len, (int)current.getRemaining());
-      int numBytesRead = current.read(b, off, numBytesToRead);
+      int numBytesToRead = Math.min(buffLen, (int)current.getRemaining());
+      int numBytesRead = strategy.readFromBlock(current, numBytesToRead);
       if (numBytesRead != numBytesToRead) {
         // This implies that there is either data loss or corruption in the
         // chunk entries. Even EOF in the current stream would be covered in
         // this case.
         throw new IOException(String.format("Inconsistent read for blockID=%s "
-                        + "length=%d numBytesToRead=%d numBytesRead=%d",
-                current.getBlockID(), current.getLength(), numBytesToRead,
-                numBytesRead));
+                + "length=%d numBytesToRead=%d numBytesRead=%d",
+            current.getBlockID(), current.getLength(), numBytesToRead,
+            numBytesRead));
       }
       totalReadLen += numBytesRead;
-      off += numBytesRead;
-      len -= numBytesRead;
+      buffLen -= numBytesRead;
       if (current.getRemaining() <= 0 &&
           ((blockIndex + 1) < blockStreams.size())) {
         blockIndex += 1;
@@ -325,62 +387,26 @@ public class KeyInputStream extends InputStream implements Seekable {
     return blockStreams.get(index).getRemaining();
   }
 
-  /**
-   * Copies some or all bytes from a large (over 2GB) <code>InputStream</code>
-   * to an <code>OutputStream</code>, optionally skipping input bytes.
-   * <p>
-   * Copy the method from IOUtils of commons-io to reimplement skip by seek
-   * rather than read. The reason why IOUtils of commons-io implement skip
-   * by read can be found at
-   * <a href="https://issues.apache.org/jira/browse/IO-203">IO-203</a>.
-   * </p>
-   * <p>
-   * This method uses the provided buffer, so there is no need to use a
-   * <code>BufferedInputStream</code>.
-   * </p>
-   *
-   * @param output the <code>OutputStream</code> to write to
-   * @param inputOffset : number of bytes to skip from input before copying
-   * -ve values are ignored
-   * @param length : number of bytes to copy. -ve means all
-   * @param buffer the buffer to use for the copy
-   * @return the number of bytes copied
-   * @throws NullPointerException if the input or output is null
-   * @throws IOException          if an I/O error occurs
-   */
-  public long copyLarge(final OutputStream output,
-      final long inputOffset, final long len, final byte[] buffer)
-      throws IOException {
-    if (inputOffset > 0) {
-      seek(inputOffset);
-    }
-
-    if (len == 0) {
+  @Override
+  public long skip(long n) throws IOException {
+    if (n <= 0) {
       return 0;
     }
 
-    final int bufferLength = buffer.length;
-    int bytesToRead = bufferLength;
-    if (len > 0 && len < bufferLength) {
-      bytesToRead = (int) len;
+    long toSkip = Math.min(n, length - getPos());
+    seek(getPos() + toSkip);
+    return toSkip;
+  }
+
+  @Override
+  public void unbuffer() {
+    for (BlockInputStream is : blockStreams) {
+      is.unbuffer();
     }
+  }
 
-    int read;
-    long totalRead = 0;
-    while (bytesToRead > 0) {
-      read = read(buffer, 0, bytesToRead);
-      if (read == IOUtils.EOF) {
-        break;
-      }
-
-      output.write(buffer, 0, read);
-      totalRead += read;
-      if (len > 0) { // only adjust len if not reading to the end
-        // Note the cast must work because buffer.length is an integer
-        bytesToRead = (int) Math.min(len - totalRead, bufferLength);
-      }
-    }
-
-    return totalRead;
+  @VisibleForTesting
+  public List<BlockInputStream> getBlockStreams() {
+    return blockStreams;
   }
 }

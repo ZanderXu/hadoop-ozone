@@ -22,6 +22,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
@@ -47,7 +48,9 @@ import org.apache.hadoop.hdds.protocol.proto.StorageContainerDatanodeProtocolPro
 import org.apache.hadoop.hdds.scm.ByteStringConversion;
 import org.apache.hadoop.hdds.scm.ScmConfigKeys;
 import org.apache.hadoop.hdds.scm.container.common.helpers.StorageContainerException;
+import org.apache.hadoop.ozone.OzoneConfigKeys;
 import org.apache.hadoop.ozone.common.ChunkBuffer;
+import org.apache.hadoop.ozone.common.utils.BufferUtils;
 import org.apache.hadoop.ozone.container.common.helpers.BlockData;
 import org.apache.hadoop.ozone.container.common.helpers.ChunkInfo;
 import org.apache.hadoop.ozone.container.common.helpers.ContainerMetrics;
@@ -63,6 +66,7 @@ import org.apache.hadoop.ozone.container.common.transport.server.ratis.Dispatche
 import org.apache.hadoop.ozone.container.common.volume.HddsVolume;
 import org.apache.hadoop.ozone.container.common.volume.RoundRobinVolumeChoosingPolicy;
 import org.apache.hadoop.ozone.container.common.volume.VolumeSet;
+import org.apache.hadoop.ozone.container.keyvalue.helpers.BlockUtils;
 import org.apache.hadoop.ozone.container.keyvalue.impl.BlockManagerImpl;
 import org.apache.hadoop.ozone.container.keyvalue.impl.ChunkManagerFactory;
 import org.apache.hadoop.ozone.container.keyvalue.interfaces.BlockManager;
@@ -91,6 +95,8 @@ import static org.apache.hadoop.hdds.scm.protocolPB.ContainerCommandResponseBuil
 import static org.apache.hadoop.hdds.scm.protocolPB.ContainerCommandResponseBuilders.malformedRequest;
 import static org.apache.hadoop.hdds.scm.protocolPB.ContainerCommandResponseBuilders.putBlockResponseSuccess;
 import static org.apache.hadoop.hdds.scm.protocolPB.ContainerCommandResponseBuilders.unsupportedRequest;
+import static org.apache.hadoop.hdds.scm.utils.ClientCommandsUtils.getReadChunkVersion;
+
 import org.apache.ratis.thirdparty.com.google.protobuf.ByteString;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -119,7 +125,8 @@ public class KeyValueHandler extends Handler {
     super(config, datanodeId, contSet, volSet, metrics, icrSender);
     containerType = ContainerType.KeyValueContainer;
     blockManager = new BlockManagerImpl(config);
-    chunkManager = ChunkManagerFactory.createChunkManager(config);
+    chunkManager = ChunkManagerFactory.createChunkManager(config, blockManager,
+        volSet);
     try {
       volumeChoosingPolicy = conf.getClass(
           HDDS_DATANODE_VOLUME_CHOOSING_POLICY, RoundRobinVolumeChoosingPolicy
@@ -127,14 +134,21 @@ public class KeyValueHandler extends Handler {
     } catch (Exception e) {
       throw new RuntimeException(e);
     }
-    maxContainerSize = (long)config.getStorageSize(
+    maxContainerSize = (long) config.getStorageSize(
         ScmConfigKeys.OZONE_SCM_CONTAINER_SIZE,
-            ScmConfigKeys.OZONE_SCM_CONTAINER_SIZE_DEFAULT, StorageUnit.BYTES);
+        ScmConfigKeys.OZONE_SCM_CONTAINER_SIZE_DEFAULT, StorageUnit.BYTES);
     // this handler lock is used for synchronizing createContainer Requests,
     // so using a fair lock here.
     containerCreationLock = new AutoCloseableLock(new ReentrantLock(true));
+
+    boolean isUnsafeByteBufferConversionEnabled =
+        conf.getBoolean(
+            OzoneConfigKeys.OZONE_UNSAFEBYTEOPERATIONS_ENABLED,
+            OzoneConfigKeys.OZONE_UNSAFEBYTEOPERATIONS_ENABLED_DEFAULT);
+
     byteBufferToByteString =
-        ByteStringConversion.createByteBufferConversion(conf);
+        ByteStringConversion
+            .createByteBufferConversion(isUnsafeByteBufferConversionEnabled);
   }
 
   @VisibleForTesting
@@ -247,7 +261,7 @@ public class KeyValueHandler extends Handler {
     boolean created = false;
     try (AutoCloseableLock l = containerCreationLock.acquire()) {
       if (containerSet.getContainer(containerID) == null) {
-        newContainer.create(volumeSet, volumeChoosingPolicy, scmID);
+        newContainer.create(volumeSet, volumeChoosingPolicy, clusterId);
         created = containerSet.addContainer(newContainer);
       } else {
         // The create container request for an already existing container can
@@ -276,7 +290,7 @@ public class KeyValueHandler extends Handler {
       HddsVolume containerVolume = volumeChoosingPolicy.chooseVolume(volumeSet
           .getVolumesList(), container.getContainerData().getMaxSize());
       String hddsVolumeDir = containerVolume.getHddsRootDir().toString();
-      container.populatePathFields(scmID, containerVolume, hddsVolumeDir);
+      container.populatePathFields(clusterId, containerVolume, hddsVolumeDir);
     } finally {
       volumeSet.readUnlock();
     }
@@ -293,14 +307,6 @@ public class KeyValueHandler extends Handler {
             request.getTraceID());
       }
       return malformedRequest(request);
-    }
-
-    // The container can become unhealthy after the lock is released.
-    // The operation will likely fail/timeout in that happens.
-    try {
-      checkContainerIsHealthy(kvContainer);
-    } catch (StorageContainerException sce) {
-      return ContainerUtils.logAndReturnError(LOG, sce, request);
     }
 
     KeyValueContainerData containerData = kvContainer.getContainerData();
@@ -420,17 +426,16 @@ public class KeyValueHandler extends Handler {
       BlockData blockData = BlockData.getFromProtoBuf(data);
       Preconditions.checkNotNull(blockData);
 
+      boolean incrKeyCount = false;
       if (!request.getPutBlock().hasEof() || request.getPutBlock().getEof()) {
-        for (ContainerProtos.ChunkInfo chunkInfo : blockData.getChunks()) {
-          chunkManager.finishWriteChunk(kvContainer, blockData.getBlockID(),
-              ChunkInfo.getFromProtoBuf(chunkInfo));
-        }
+        chunkManager.finishWriteChunks(kvContainer, blockData);
+        incrKeyCount = true;
       }
 
       long bcsId =
           dispatcherContext == null ? 0 : dispatcherContext.getLogIndex();
       blockData.setBlockCommitSequenceId(bcsId);
-      blockManager.putBlock(kvContainer, blockData);
+      blockManager.putBlock(kvContainer, blockData, incrKeyCount);
 
       blockDataProto = blockData.getProtoBufMessage();
 
@@ -461,18 +466,11 @@ public class KeyValueHandler extends Handler {
       return malformedRequest(request);
     }
 
-    // The container can become unhealthy after the lock is released.
-    // The operation will likely fail/timeout in that happens.
-    try {
-      checkContainerIsHealthy(kvContainer);
-    } catch (StorageContainerException sce) {
-      return ContainerUtils.logAndReturnError(LOG, sce, request);
-    }
-
     ContainerProtos.BlockData responseData;
     try {
       BlockID blockID = BlockID.getFromProtobuf(
           request.getGetBlock().getBlockID());
+      checkContainerIsHealthy(kvContainer, blockID, Type.GetBlock);
       responseData = blockManager.getBlock(kvContainer, blockID)
           .getProtoBufMessage();
       final long numBytes = responseData.getSerializedSize();
@@ -503,18 +501,13 @@ public class KeyValueHandler extends Handler {
       return malformedRequest(request);
     }
 
-    // The container can become unhealthy after the lock is released.
-    // The operation will likely fail/timeout in that happens.
-    try {
-      checkContainerIsHealthy(kvContainer);
-    } catch (StorageContainerException sce) {
-      return ContainerUtils.logAndReturnError(LOG, sce, request);
-    }
-
     long blockLength;
     try {
       BlockID blockID = BlockID
           .getFromProtobuf(request.getGetCommittedBlockLength().getBlockID());
+      checkContainerIsHealthy(kvContainer, blockID,
+          Type.GetCommittedBlockLength);
+      BlockUtils.verifyBCSId(kvContainer, blockID);
       blockLength = blockManager.getCommittedBlockLength(kvContainer, blockID);
     } catch (StorageContainerException ex) {
       return ContainerUtils.logAndReturnError(LOG, ex, request);
@@ -574,14 +567,6 @@ public class KeyValueHandler extends Handler {
       return malformedRequest(request);
     }
 
-    // The container can become unhealthy after the lock is released.
-    // The operation will likely fail/timeout if that happens.
-    try {
-      checkContainerIsHealthy(kvContainer);
-    } catch (StorageContainerException sce) {
-      return ContainerUtils.logAndReturnError(LOG, sce, request);
-    }
-
     ChunkBuffer data;
     try {
       BlockID blockID = BlockID.getFromProtobuf(
@@ -590,12 +575,24 @@ public class KeyValueHandler extends Handler {
           .getChunkData());
       Preconditions.checkNotNull(chunkInfo);
 
+      checkContainerIsHealthy(kvContainer, blockID, Type.ReadChunk);
+      BlockUtils.verifyBCSId(kvContainer, blockID);
       if (dispatcherContext == null) {
         dispatcherContext = new DispatcherContext.Builder().build();
       }
 
-      data = chunkManager
-          .readChunk(kvContainer, blockID, chunkInfo, dispatcherContext);
+      boolean isReadChunkV0 = getReadChunkVersion(request.getReadChunk())
+          .equals(ContainerProtos.ReadChunkVersion.V0);
+      if (isReadChunkV0) {
+        // For older clients, set ReadDataIntoSingleBuffer to true so that
+        // all the data read from chunk file is returned as a single
+        // ByteString. Older clients cannot process data returned as a list
+        // of ByteStrings.
+        chunkInfo.setReadDataIntoSingleBuffer(true);
+      }
+
+      data = chunkManager.readChunk(kvContainer, blockID, chunkInfo,
+          dispatcherContext);
       metrics.incContainerBytesStats(Type.ReadChunk, chunkInfo.getLen());
     } catch (StorageContainerException ex) {
       return ContainerUtils.logAndReturnError(LOG, ex, request);
@@ -607,25 +604,22 @@ public class KeyValueHandler extends Handler {
 
     Preconditions.checkNotNull(data, "Chunk data is null");
 
-    ByteString byteString = data.toByteString(byteBufferToByteString);
-    return getReadChunkResponse(request, byteString);
+    return getReadChunkResponse(request, data, byteBufferToByteString);
   }
 
   /**
    * Throw an exception if the container is unhealthy.
    *
    * @throws StorageContainerException if the container is unhealthy.
-   * @param kvContainer
    */
   @VisibleForTesting
-  void checkContainerIsHealthy(KeyValueContainer kvContainer)
-      throws StorageContainerException {
+  void checkContainerIsHealthy(KeyValueContainer kvContainer, BlockID blockID,
+      Type cmd) {
     kvContainer.readLock();
     try {
       if (kvContainer.getContainerData().getState() == State.UNHEALTHY) {
-        throw new StorageContainerException(
-            "The container replica is unhealthy.",
-            CONTAINER_UNHEALTHY);
+        LOG.warn("{} request {} for UNHEALTHY container {} replica", cmd,
+            blockID, kvContainer.getContainerData().getContainerID());
       }
     } finally {
       kvContainer.readUnlock();
@@ -644,14 +638,6 @@ public class KeyValueHandler extends Handler {
             request.getTraceID());
       }
       return malformedRequest(request);
-    }
-
-    // The container can become unhealthy after the lock is released.
-    // The operation will likely fail/timeout in that happens.
-    try {
-      checkContainerIsHealthy(kvContainer);
-    } catch (StorageContainerException sce) {
-      return ContainerUtils.logAndReturnError(LOG, sce, request);
     }
 
     try {
@@ -773,7 +759,7 @@ public class KeyValueHandler extends Handler {
       // here. There is no need to maintain this info in openContainerBlockMap.
       chunkManager
           .writeChunk(kvContainer, blockID, chunkInfo, data, dispatcherContext);
-      chunkManager.finishWriteChunk(kvContainer, blockID, chunkInfo);
+      chunkManager.finishWriteChunks(kvContainer, blockData);
 
       List<ContainerProtos.ChunkInfo> chunks = new LinkedList<>();
       chunks.add(chunkInfoProto);
@@ -811,36 +797,40 @@ public class KeyValueHandler extends Handler {
       return malformedRequest(request);
     }
 
-    // The container can become unhealthy after the lock is released.
-    // The operation will likely fail/timeout in that happens.
-    try {
-      checkContainerIsHealthy(kvContainer);
-    } catch (StorageContainerException sce) {
-      return ContainerUtils.logAndReturnError(LOG, sce, request);
-    }
-
     GetSmallFileRequestProto getSmallFileReq = request.getGetSmallFile();
 
     try {
       BlockID blockID = BlockID.getFromProtobuf(getSmallFileReq.getBlock()
           .getBlockID());
+      checkContainerIsHealthy(kvContainer, blockID, Type.GetSmallFile);
       BlockData responseData = blockManager.getBlock(kvContainer, blockID);
 
-      ContainerProtos.ChunkInfo chunkInfo = null;
-      ByteString dataBuf = ByteString.EMPTY;
+      ContainerProtos.ChunkInfo chunkInfoProto = null;
+      List<ByteString> dataBuffers = new ArrayList<>();
       DispatcherContext dispatcherContext =
           new DispatcherContext.Builder().build();
       for (ContainerProtos.ChunkInfo chunk : responseData.getChunks()) {
         // if the block is committed, all chunks must have been committed.
         // Tmp chunk files won't exist here.
+        ChunkInfo chunkInfo = ChunkInfo.getFromProtoBuf(chunk);
+        boolean isReadChunkV0 = getReadChunkVersion(request.getGetSmallFile())
+            .equals(ContainerProtos.ReadChunkVersion.V0);
+        if (isReadChunkV0) {
+          // For older clients, set ReadDataIntoSingleBuffer to true so that
+          // all the data read from chunk file is returned as a single
+          // ByteString. Older clients cannot process data returned as a list
+          // of ByteStrings.
+          chunkInfo.setReadDataIntoSingleBuffer(true);
+        }
         ChunkBuffer data = chunkManager.readChunk(kvContainer, blockID,
-            ChunkInfo.getFromProtoBuf(chunk), dispatcherContext);
-        ByteString current = data.toByteString(byteBufferToByteString);
-        dataBuf = dataBuf.concat(current);
-        chunkInfo = chunk;
+            chunkInfo, dispatcherContext);
+        dataBuffers.addAll(data.toByteStringList(byteBufferToByteString));
+        chunkInfoProto = chunk;
       }
-      metrics.incContainerBytesStats(Type.GetSmallFile, dataBuf.size());
-      return getGetSmallFileResponseSuccess(request, dataBuf, chunkInfo);
+      metrics.incContainerBytesStats(Type.GetSmallFile,
+          BufferUtils.getBuffersLen(dataBuffers));
+      return getGetSmallFileResponseSuccess(request, dataBuffers,
+          chunkInfoProto);
     } catch (StorageContainerException e) {
       return ContainerUtils.logAndReturnError(LOG, e, request);
     } catch (IOException ex) {
@@ -926,13 +916,8 @@ public class KeyValueHandler extends Handler {
       final OutputStream outputStream,
       final TarContainerPacker packer)
       throws IOException{
-    container.readLock();
-    try {
-      final KeyValueContainer kvc = (KeyValueContainer) container;
-      kvc.exportContainerData(outputStream, packer);
-    } finally {
-      container.readUnlock();
-    }
+    final KeyValueContainer kvc = (KeyValueContainer) container;
+    kvc.exportContainerData(outputStream, packer);
   }
 
   @Override
@@ -1069,5 +1054,7 @@ public class KeyValueHandler extends Handler {
     }
     // Avoid holding write locks for disk operations
     container.delete();
+    container.getContainerData().setState(State.DELETED);
+    sendICR(container);
   }
 }

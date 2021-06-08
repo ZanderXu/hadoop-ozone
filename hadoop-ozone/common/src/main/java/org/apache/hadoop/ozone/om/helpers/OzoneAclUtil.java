@@ -26,6 +26,7 @@ import org.apache.hadoop.ozone.security.acl.IAccessAuthorizer.ACLType;
 import org.apache.hadoop.ozone.security.acl.RequestContext;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.BitSet;
 import java.util.List;
 import java.util.stream.Collectors;
@@ -53,7 +54,7 @@ public final class OzoneAclUtil {
    * @return list of OzoneAcls
    * */
   public static List<OzoneAcl> getAclList(String userName,
-      List<String> userGroups, ACLType userRights, ACLType groupRights) {
+      String[] userGroups, ACLType userRights, ACLType groupRights) {
 
     List<OzoneAcl> listOfAcls = new ArrayList<>();
 
@@ -61,10 +62,30 @@ public final class OzoneAclUtil {
     listOfAcls.add(new OzoneAcl(USER, userName, userRights, ACCESS));
     if(userGroups != null) {
       // Group ACLs of the User.
-      userGroups.forEach((group) -> listOfAcls.add(
+      Arrays.asList(userGroups).forEach((group) -> listOfAcls.add(
           new OzoneAcl(GROUP, group, groupRights, ACCESS)));
     }
     return listOfAcls;
+  }
+
+  /**
+   * Helper function to get acl list for one user/group.
+   *
+   * @param identityName
+   * @param type
+   * @param aclList
+   * @return list of OzoneAcls
+   * */
+  public static List<OzoneAcl> filterAclList(String identityName,
+      IAccessAuthorizer.ACLIdentityType type, List<OzoneAcl> aclList) {
+
+    if (aclList == null || aclList.isEmpty()) {
+      return new ArrayList<>();
+    }
+
+    List retList = aclList.stream().filter(acl -> acl.getType() == type
+        && acl.getName().equals(identityName)).collect(Collectors.toList());
+    return retList;
   }
 
   /**
@@ -174,7 +195,7 @@ public final class OzoneAclUtil {
       inheritedAcls = parentAcls.stream()
           .filter(a -> a.getAclScope() == DEFAULT)
           .map(acl -> new OzoneAcl(acl.getType(), acl.getName(),
-              acl.getAclBitSet(), OzoneAcl.AclScope.ACCESS))
+              acl.getAclBitSet(), ACCESS))
           .collect(Collectors.toList());
     }
     if (inheritedAcls != null && !inheritedAcls.isEmpty()) {
@@ -190,8 +211,11 @@ public final class OzoneAclUtil {
    * @return list of OzoneAcl.
    */
   public static List<OzoneAcl> fromProtobuf(List<OzoneAclInfo> protoAcls) {
-    return protoAcls.stream().map(acl->OzoneAcl.fromProtobuf(acl))
-        .collect(Collectors.toList());
+    List<OzoneAcl> ozoneAcls = new ArrayList<>();
+    for (OzoneAclInfo aclInfo : protoAcls) {
+      ozoneAcls.add(OzoneAcl.fromProtobuf(aclInfo));
+    }
+    return ozoneAcls;
   }
 
   /**
@@ -200,8 +224,11 @@ public final class OzoneAclUtil {
    * @return list of OzoneAclInfo.
    */
   public static List<OzoneAclInfo> toProtobuf(List<OzoneAcl> protoAcls) {
-    return protoAcls.stream().map(acl->OzoneAcl.toProtobuf(acl))
-        .collect(Collectors.toList());
+    List<OzoneAclInfo> ozoneAclInfos = new ArrayList<>();
+    for (OzoneAcl acl : protoAcls) {
+      ozoneAclInfos.add(OzoneAcl.toProtobuf(acl));
+    }
+    return ozoneAclInfos;
   }
 
   /**

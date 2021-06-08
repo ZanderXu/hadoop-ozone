@@ -53,20 +53,18 @@ public class TestOMAllocateBlockRequest extends TestOMKeyRequest {
 
   @Test
   public void testValidateAndUpdateCache() throws Exception {
-
-    OMRequest modifiedOmRequest =
-        doPreExecute(createAllocateBlockRequest());
-
-    OMAllocateBlockRequest omAllocateBlockRequest =
-        new OMAllocateBlockRequest(modifiedOmRequest);
-
-
     // Add volume, bucket, key entries to DB.
     TestOMRequestUtils.addVolumeAndBucketToDB(volumeName, bucketName,
         omMetadataManager);
 
     TestOMRequestUtils.addKeyToTable(true, volumeName, bucketName, keyName,
         clientID, replicationType, replicationFactor, omMetadataManager);
+
+    OMRequest modifiedOmRequest =
+        doPreExecute(createAllocateBlockRequest());
+
+    OMAllocateBlockRequest omAllocateBlockRequest =
+        new OMAllocateBlockRequest(modifiedOmRequest);
 
     // Check before calling validateAndUpdateCache. As adding DB entry has
     // not added any blocks, so size should be zero.
@@ -97,8 +95,12 @@ public class TestOMAllocateBlockRequest extends TestOMKeyRequest {
     // Check modification time
     Assert.assertEquals(modifiedOmRequest.getAllocateBlockRequest()
         .getKeyArgs().getModificationTime(), omKeyInfo.getModificationTime());
-    Assert.assertNotEquals(omKeyInfo.getCreationTime(),
-        omKeyInfo.getModificationTime());
+
+    // creationTime was assigned at TestOMRequestUtils.addKeyToTable
+    // modificationTime was assigned at
+    // doPreExecute(createAllocateBlockRequest())
+    Assert.assertTrue(
+        omKeyInfo.getCreationTime() <= omKeyInfo.getModificationTime());
 
     // Check data of the block
     OzoneManagerProtocolProtos.KeyLocation keyLocation =
@@ -211,10 +213,10 @@ public class TestOMAllocateBlockRequest extends TestOMKeyRequest {
 
     // KeyLocation should be set.
     Assert.assertTrue(allocateBlockRequest.hasKeyLocation());
-    Assert.assertEquals(containerID,
+    Assert.assertEquals(CONTAINER_ID,
         allocateBlockRequest.getKeyLocation().getBlockID()
             .getContainerBlockID().getContainerID());
-    Assert.assertEquals(localID,
+    Assert.assertEquals(LOCAL_ID,
         allocateBlockRequest.getKeyLocation().getBlockID()
             .getContainerBlockID().getLocalID());
     Assert.assertTrue(allocateBlockRequest.getKeyLocation().hasPipeline());

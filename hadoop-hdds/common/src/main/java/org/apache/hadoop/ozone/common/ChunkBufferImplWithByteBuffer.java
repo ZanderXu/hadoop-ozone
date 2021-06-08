@@ -17,17 +17,18 @@
  */
 package org.apache.hadoop.ozone.common;
 
-import org.apache.ratis.thirdparty.com.google.protobuf.ByteString;
-
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.GatheringByteChannel;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Objects;
 import java.util.function.Function;
+
+import org.apache.ratis.thirdparty.com.google.protobuf.ByteString;
 
 /** {@link ChunkBuffer} implementation using a single {@link ByteBuffer}. */
 final class ChunkBufferImplWithByteBuffer implements ChunkBuffer {
@@ -105,6 +106,12 @@ final class ChunkBufferImplWithByteBuffer implements ChunkBuffer {
   }
 
   @Override
+  public ChunkBuffer put(byte b) {
+    buffer.put(b);
+    return this;
+  }
+
+  @Override
   public ChunkBuffer clear() {
     buffer.clear();
     return this;
@@ -113,6 +120,12 @@ final class ChunkBufferImplWithByteBuffer implements ChunkBuffer {
   @Override
   public ByteString toByteStringImpl(Function<ByteBuffer, ByteString> f) {
     return f.apply(buffer);
+  }
+
+  @Override
+  public List<ByteString> toByteStringListImpl(
+      Function<ByteBuffer, ByteString> f) {
+    return Arrays.asList(f.apply(buffer));
   }
 
   @Override

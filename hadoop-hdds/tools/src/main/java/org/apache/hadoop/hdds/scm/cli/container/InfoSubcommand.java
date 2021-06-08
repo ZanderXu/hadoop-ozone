@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -17,21 +17,26 @@
  */
 package org.apache.hadoop.hdds.scm.cli.container;
 
-import java.util.concurrent.Callable;
+import java.io.IOException;
 import java.util.stream.Collectors;
 
+import org.apache.hadoop.hdds.cli.GenericParentCommand;
 import org.apache.hadoop.hdds.cli.HddsVersionProvider;
 import org.apache.hadoop.hdds.protocol.DatanodeDetails;
+import org.apache.hadoop.hdds.scm.cli.ScmSubcommand;
 import org.apache.hadoop.hdds.scm.client.ScmClient;
 import org.apache.hadoop.hdds.scm.container.common.helpers
     .ContainerWithPipeline;
 
 import com.google.common.base.Preconditions;
+import org.apache.hadoop.hdds.server.JsonUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import picocli.CommandLine;
 import picocli.CommandLine.Command;
+import picocli.CommandLine.Model.CommandSpec;
 import picocli.CommandLine.Parameters;
-import picocli.CommandLine.ParentCommand;
+import picocli.CommandLine.Spec;
 
 /**
  * This is the handler that process container info command.
@@ -41,27 +46,40 @@ import picocli.CommandLine.ParentCommand;
     description = "Show information about a specific container",
     mixinStandardHelpOptions = true,
     versionProvider = HddsVersionProvider.class)
-public class InfoSubcommand implements Callable<Void> {
+public class InfoSubcommand extends ScmSubcommand {
 
   private static final Logger LOG =
       LoggerFactory.getLogger(InfoSubcommand.class);
 
-  @ParentCommand
-  private ContainerCommands parent;
+  @Spec
+  private CommandSpec spec;
+
+  @CommandLine.Option(names = { "--json" },
+      defaultValue = "false",
+      description = "Format output as JSON")
+  private boolean json;
 
   @Parameters(description = "Decimal id of the container.")
   private long containerID;
 
   @Override
-  public Void call() throws Exception {
-    try (ScmClient scmClient = parent.getParent().createScmClient()) {
-      final ContainerWithPipeline container = scmClient.
-          getContainerWithPipeline(containerID);
-      Preconditions.checkNotNull(container, "Container cannot be null");
+  public void execute(ScmClient scmClient) throws IOException {
+    final ContainerWithPipeline container = scmClient.
+        getContainerWithPipeline(containerID);
+    Preconditions.checkNotNull(container, "Container cannot be null");
 
+    if (json) {
+      LOG.info(JsonUtils.toJsonStringWithDefaultPrettyPrinter(container));
+    } else {
       // Print container report info.
       LOG.info("Container id: {}", containerID);
-      LOG.info("Pipeline id: {}", container.getPipeline().getId().getId());
+      boolean verbose = spec.root().userObject() instanceof GenericParentCommand
+          && ((GenericParentCommand) spec.root().userObject()).isVerbose();
+      if (verbose) {
+        LOG.info("Pipeline Info: {}", container.getPipeline());
+      } else {
+        LOG.info("Pipeline id: {}", container.getPipeline().getId().getId());
+      }
       LOG.info("Container State: {}", container.getContainerInfo().getState());
 
       // Print pipeline of an existing container.
@@ -69,7 +87,6 @@ public class InfoSubcommand implements Callable<Void> {
           InfoSubcommand::buildDatanodeDetails)
           .collect(Collectors.joining(",\n"));
       LOG.info("Datanodes: [{}]", machinesStr);
-      return null;
     }
   }
 

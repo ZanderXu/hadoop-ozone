@@ -36,7 +36,7 @@ public class TestS3InitiateMultipartUploadRequest
     extends TestS3MultipartRequest {
 
   @Test
-  public void testPreExecute() {
+  public void testPreExecute() throws Exception {
     doPreExecuteInitiateMPU(UUID.randomUUID().toString(),
         UUID.randomUUID().toString(), UUID.randomUUID().toString());
   }
@@ -118,7 +118,6 @@ public class TestS3InitiateMultipartUploadRequest
     Assert.assertNull(omMetadataManager.getOpenKeyTable().get(multipartKey));
     Assert.assertNull(omMetadataManager.getMultipartInfoTable()
         .get(multipartKey));
-
   }
 
   @Test
@@ -126,7 +125,6 @@ public class TestS3InitiateMultipartUploadRequest
     String volumeName = UUID.randomUUID().toString();
     String bucketName = UUID.randomUUID().toString();
     String keyName = UUID.randomUUID().toString();
-
 
     OMRequest modifiedRequest = doPreExecuteInitiateMPU(volumeName, bucketName,
         keyName);
@@ -148,6 +146,5 @@ public class TestS3InitiateMultipartUploadRequest
     Assert.assertNull(omMetadataManager.getOpenKeyTable().get(multipartKey));
     Assert.assertNull(omMetadataManager.getMultipartInfoTable()
         .get(multipartKey));
-
   }
 }

@@ -18,6 +18,7 @@
 
 package org.apache.hadoop.hdds.scm.pipeline;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
 
 import java.util.UUID;
@@ -45,17 +46,33 @@ public final class PipelineID {
     return id;
   }
 
+  @JsonIgnore
   public HddsProtos.PipelineID getProtobuf() {
-    return HddsProtos.PipelineID.newBuilder().setId(id.toString()).build();
+    HddsProtos.UUID uuid128 = HddsProtos.UUID.newBuilder()
+        .setMostSigBits(id.getMostSignificantBits())
+        .setLeastSigBits(id.getLeastSignificantBits())
+        .build();
+
+    return HddsProtos.PipelineID.newBuilder().setId(id.toString())
+        .setUuid128(uuid128).build();
   }
 
   public static PipelineID getFromProtobuf(HddsProtos.PipelineID protos) {
-    return new PipelineID(UUID.fromString(protos.getId()));
+    if (protos.hasUuid128()) {
+      HddsProtos.UUID uuid = protos.getUuid128();
+      return new PipelineID(
+          new UUID(uuid.getMostSigBits(), uuid.getLeastSigBits()));
+    } else if (protos.hasId()) {
+      return new PipelineID(UUID.fromString(protos.getId()));
+    } else {
+      throw new IllegalArgumentException(
+          "Pipeline does not has uuid128 in proto");
+    }
   }
 
   @Override
   public String toString() {
-    return "PipelineID=" + id;
+    return "PipelineID=" + id.toString();
   }
 
   @Override

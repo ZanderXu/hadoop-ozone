@@ -19,12 +19,13 @@
 package org.apache.hadoop.ozone.om.request.key.acl;
 
 import java.io.IOException;
+import java.util.Map;
 
 import com.google.common.base.Optional;
+import org.apache.hadoop.ozone.audit.AuditLogger;
 import org.apache.hadoop.ozone.om.OMMetadataManager;
 import org.apache.hadoop.ozone.om.OzoneManager;
 import org.apache.hadoop.ozone.om.exceptions.OMException;
-import org.apache.hadoop.ozone.om.exceptions.OMReplayException;
 import org.apache.hadoop.ozone.om.helpers.OmKeyInfo;
 import org.apache.hadoop.ozone.om.ratis.utils.OzoneManagerDoubleBufferHelper;
 import org.apache.hadoop.ozone.om.request.OMClientRequest;
@@ -93,16 +94,23 @@ public abstract class OMKeyAclRequest extends OMClientRequest {
         throw new OMException(OMException.ResultCodes.KEY_NOT_FOUND);
       }
 
-      // Check if this transaction is a replay of ratis logs.
-      // If this is a replay, then the response has already been returned to
-      // the client. So take no further action and return a dummy
-      // OMClientResponse.
-      if (isReplay(ozoneManager, omKeyInfo, trxnLogIndex)) {
-        throw new OMReplayException();
-      }
-
       operationResult = apply(omKeyInfo, trxnLogIndex);
       omKeyInfo.setUpdateID(trxnLogIndex, ozoneManager.isRatisEnabled());
+
+      // Update the modification time when updating ACLs of Key.
+      long modificationTime = omKeyInfo.getModificationTime();
+      if (getOmRequest().getAddAclRequest().hasObj() && operationResult) {
+        modificationTime = getOmRequest().getAddAclRequest()
+            .getModificationTime();
+      } else if (getOmRequest().getSetAclRequest().hasObj() && operationResult){
+        modificationTime = getOmRequest().getSetAclRequest()
+            .getModificationTime();
+      } else if (getOmRequest().getRemoveAclRequest().hasObj()
+          && operationResult) {
+        modificationTime = getOmRequest().getRemoveAclRequest()
+            .getModificationTime();
+      }
+      omKeyInfo.setModificationTime(modificationTime);
 
       // update cache.
       omMetadataManager.getKeyTable().addCacheEntry(
@@ -112,14 +120,9 @@ public abstract class OMKeyAclRequest extends OMClientRequest {
       omClientResponse = onSuccess(omResponse, omKeyInfo, operationResult);
       result = Result.SUCCESS;
     } catch (IOException ex) {
-      if (ex instanceof OMReplayException) {
-        result = Result.REPLAY;
-        omClientResponse = onReplay(omResponse);
-      } else {
-        result = Result.FAILURE;
-        exception = ex;
-        omClientResponse = onFailure(omResponse, ex);
-      }
+      result = Result.FAILURE;
+      exception = ex;
+      omClientResponse = onFailure(omResponse, ex);
     } finally {
       addResponseToDoubleBuffer(trxnLogIndex, omClientResponse,
           omDoubleBufferHelper);
@@ -129,7 +132,10 @@ public abstract class OMKeyAclRequest extends OMClientRequest {
       }
     }
 
-    onComplete(result, operationResult, exception, trxnLogIndex);
+    OzoneObj obj = getObject();
+    Map<String, String> auditMap = obj.toAuditMap();
+    onComplete(result, operationResult, exception, trxnLogIndex,
+        ozoneManager.getAuditLogger(), auditMap);
 
     return omClientResponse;
   }
@@ -139,6 +145,12 @@ public abstract class OMKeyAclRequest extends OMClientRequest {
    * @return path name
    */
   abstract String getPath();
+
+  /**
+   * Get Key object Info from the request.
+   * @return OzoneObjInfo
+   */
+  abstract OzoneObj getObject();
 
   // TODO: Finer grain metrics can be moved to these callbacks. They can also
   // be abstracted into separate interfaces in future.
@@ -170,10 +182,6 @@ public abstract class OMKeyAclRequest extends OMClientRequest {
     return new OMKeyAclResponse(createErrorOMResponse(omResponse, exception));
   }
 
-  OMClientResponse onReplay(OMResponse.Builder omResponse) {
-    return new OMKeyAclResponse(createReplayOMResponse(omResponse));
-  }
-
   /**
    * Completion hook for final processing before return without lock.
    * Usually used for logging without lock and metric update.
@@ -181,7 +189,8 @@ public abstract class OMKeyAclRequest extends OMClientRequest {
    * @param exception
    */
   abstract void onComplete(Result result, boolean operationResult,
-      IOException exception, long trxnLogIndex);
+      IOException exception, long trxnLogIndex, AuditLogger auditLogger,
+      Map<String, String> auditMap);
 
   /**
    * Apply the acl operation, if successfully completed returns true,

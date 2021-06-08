@@ -49,7 +49,7 @@ public class TestOzoneDatanodeShell {
     * Set a timeout for each test.
     */
   @Rule
-  public Timeout timeout = new Timeout(300000);
+  public Timeout timeout = Timeout.seconds(300);
 
   private static final Logger LOG =
       LoggerFactory.getLogger(TestOzoneDatanodeShell.class);
@@ -130,7 +130,7 @@ public class TestOzoneDatanodeShell {
   @Test
   public void testDatanodeInvalidParamCommand() {
     LOG.info("Running testDatanodeIncompleteCommand");
-    String expectedError = "Unknown option: -invalidParam";
+    String expectedError = "Unknown option: '-invalidParam'";
     //executing 'ozone datanode -invalidParam'
     String[] args = new String[]{"-invalidParam"};
 

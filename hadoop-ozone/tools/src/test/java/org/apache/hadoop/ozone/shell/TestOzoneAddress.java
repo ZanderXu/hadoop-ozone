@@ -39,9 +39,9 @@ public class TestOzoneAddress {
   @Parameters
   public static Collection<Object[]> data() {
     return Arrays.asList(new Object[][] {
-        {"o3fs://localhost:9878/"},
-        {"o3fs://localhost/"},
-        {"o3fs:///"},
+        {"o3://localhost:9878/"},
+        {"o3://localhost/"},
+        {"o3:///"},
         {"/"},
         {""}
     });
@@ -94,5 +94,16 @@ public class TestOzoneAddress {
     Assert.assertEquals("vol1", address.getVolumeName());
     Assert.assertEquals("bucket", address.getBucketName());
     Assert.assertEquals("key1/key3/key", address.getKeyName());
+    Assert.assertFalse("this should not be a prefix",
+        address.isPrefix());
+
+    address = new OzoneAddress(prefix + "vol1/bucket/prefix");
+    address.ensurePrefixAddress();
+    Assert.assertEquals("vol1", address.getVolumeName());
+    Assert.assertEquals("bucket", address.getBucketName());
+    Assert.assertEquals("prefix", address.getKeyName());
+    Assert.assertTrue("this should be a prefix",
+        address.isPrefix());
+
   }
 }

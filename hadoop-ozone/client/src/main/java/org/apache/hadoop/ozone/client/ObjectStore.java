@@ -156,6 +156,10 @@ public class ObjectStore {
     return proxy.getS3Secret(kerberosID);
   }
 
+  public void revokeS3Secret(String kerberosID) throws IOException {
+    proxy.revokeS3Secret(kerberosID);
+  }
+
   /**
    * Returns Iterator to iterate over all the volumes in object store.
    * The result can be restricted using volume prefix, will return all
@@ -185,10 +189,15 @@ public class ObjectStore {
   }
 
   /**
-   * Returns Iterator to iterate over the list of volumes after prevVolume owned
-   * by a specific user. The result can be restricted using volume prefix, will
-   * return all volumes if volume prefix is null. If user is not null, returns
-   * the volume of current user.
+   * Returns Iterator to iterate over the list of volumes after prevVolume
+   * accessible by a specific user. The result can be restricted using volume
+   * prefix, will return all volumes if volume prefix is null. If user is not
+   * null, returns the volume of current user.
+   *
+   * Definition of accessible:
+   * When ACL is enabled, accessible means the user has LIST permission.
+   * When ACL is disabled, accessible means the user is the owner of the volume.
+   * See {@code OzoneManager#listVolumeByUser}.
    *
    * @param user User Name
    * @param volumePrefix Volume prefix to match
@@ -248,6 +257,9 @@ public class ObjectStore {
 
     @Override
     public boolean hasNext() {
+      // IMPORTANT: Without this logic, remote iteration will not work.
+      // Removing this will break the listVolume call if we try to
+      // list more than 1000 (ozone.client.list.cache ) volumes.
       if (!currentIterator.hasNext() && currentValue != null) {
         currentIterator = getNextListOfVolumes(currentValue.getName())
             .iterator();

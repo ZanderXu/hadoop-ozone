@@ -24,8 +24,6 @@ import java.util.ArrayList;
 import java.util.List;
 
 import com.google.common.base.Optional;
-import com.google.common.base.Preconditions;
-import org.apache.commons.lang3.tuple.ImmutablePair;
 import org.apache.hadoop.hdds.utils.db.cache.CacheKey;
 import org.apache.hadoop.hdds.utils.db.cache.CacheValue;
 import org.apache.hadoop.ozone.OzoneAcl;
@@ -44,7 +42,6 @@ public final class OMFileRequest {
 
   private static final Logger LOG =
       LoggerFactory.getLogger(OMFileRequest.class);
-  private static final long TRANSACTION_ID_SHIFT = 8;
 
   private OMFileRequest() {
   }
@@ -130,33 +127,6 @@ public final class OMFileRequest {
   }
 
   /**
-   * Get the valid base object id given the transaction id.
-   * @param id of the transaction
-   * @return base object id allocated against the transaction
-   */
-  public static long getObjIDFromTxId(long id) {
-    return id << TRANSACTION_ID_SHIFT;
-  }
-
-  /**
-   * Generate the valid object id range for the transaction id.
-   * The transaction id is left shifted by 8 bits -
-   * creating space to create (2^8 - 1) object ids in every request.
-   * maxId (right element of Immutable pair) represents the largest
-   * object id allocation possible inside the transaction.
-   * @param id
-   * @return object id range
-   */
-  public static ImmutablePair<Long, Long> getObjIdRangeFromTxId(long id) {
-    long baseId = getObjIDFromTxId(id);
-    // 1 less than the baseId for the next transaction
-    long maxAvailableId = getObjIDFromTxId(id+1) - 1;
-    Preconditions.checkState(maxAvailableId >= baseId,
-        "max available id must be atleast equal to the base id.");
-    return new ImmutablePair<>(baseId, maxAvailableId);
-  }
-
-  /**
    * Class to return the results from verifyFilesInPath.
    * Includes the list of missing intermediate directories and
    * the directory search result code.
@@ -197,7 +167,7 @@ public final class OMFileRequest {
   /**
    * Return codes used by verifyFilesInPath method.
    */
-  enum OMDirectoryResult {
+  public enum OMDirectoryResult {
 
     // In below examples path is assumed as "a/b/c" in volume volume1 and
     // bucket b1.

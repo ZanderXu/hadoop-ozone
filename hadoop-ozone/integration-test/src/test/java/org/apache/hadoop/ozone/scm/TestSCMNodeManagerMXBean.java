@@ -54,7 +54,7 @@ public class TestSCMNodeManagerMXBean {
     * Set a timeout for each test.
     */
   @Rule
-  public Timeout timeout = new Timeout(300000);
+  public Timeout timeout = Timeout.seconds(300);
   public static final Log LOG = LogFactory.getLog(TestSCMMXBean.class);
   private static int numOfDatanodes = 3;
   private static MiniOzoneCluster cluster;
@@ -100,10 +100,32 @@ public class TestSCMNodeManagerMXBean {
             + "name=SCMNodeManagerInfo");
 
     TabularData data = (TabularData) mbs.getAttribute(bean, "NodeCount");
-    Map<String, Integer> nodeCount = scm.getScmNodeManager().getNodeCount();
-    Map<String, Long> nodeCountLong = new HashMap<>();
-    nodeCount.forEach((k, v) -> nodeCountLong.put(k, new Long(v)));
-    verifyEquals(data, nodeCountLong);
+    Map<String, Map<String, Integer>> mbeanMap = convertNodeCountToMap(data);
+    Map<String, Map<String, Integer>> nodeMap =
+        scm.getScmNodeManager().getNodeCount();
+    assertTrue(nodeMap.equals(mbeanMap));
+  }
+
+  private Map<String, Map<String, Integer>> convertNodeCountToMap(
+      TabularData data) {
+    Map<String, Map<String, Integer>> map = new HashMap<>();
+    for (Object o : data.values()) {
+      CompositeData cds = (CompositeData) o;
+      Iterator<?> it = cds.values().iterator();
+      String opState = it.next().toString();
+      TabularData states = (TabularData) it.next();
+
+      Map<String, Integer> healthStates = new HashMap<>();
+      for (Object obj : states.values()) {
+        CompositeData stateData = (CompositeData) obj;
+        Iterator<?> stateIt = stateData.values().iterator();
+        String health = stateIt.next().toString();
+        Integer value = Integer.parseInt(stateIt.next().toString());
+        healthStates.put(health, value);
+      }
+      map.put(opState, healthStates);
+    }
+    return map;
   }
 
   private void verifyEquals(TabularData actualData, Map<String, Long>

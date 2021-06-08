@@ -19,7 +19,7 @@ package org.apache.hadoop.ozone.s3;
 
 import org.apache.hadoop.fs.InvalidRequestException;
 import org.apache.hadoop.hdds.conf.OzoneConfiguration;
-import org.apache.hadoop.test.GenericTestUtils;
+import org.apache.ozone.test.GenericTestUtils;
 import org.glassfish.jersey.internal.PropertiesDelegate;
 import org.glassfish.jersey.server.ContainerRequest;
 import org.junit.Assert;
@@ -39,8 +39,8 @@ import static org.junit.Assert.fail;
  */
 public class TestVirtualHostStyleFilter {
 
-  private static OzoneConfiguration conf;
-  private static String s3HttpAddr;
+  private OzoneConfiguration conf;
+  private String s3HttpAddr;
 
   @Before
   public void setup() {

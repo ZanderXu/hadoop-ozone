@@ -17,6 +17,7 @@
 package org.apache.hadoop.ozone.om;
 
 import com.google.common.base.Strings;
+import org.apache.hadoop.ozone.OmUtils;
 import org.apache.hadoop.ozone.OzoneAcl;
 import org.apache.hadoop.ozone.om.exceptions.OMException;
 import org.apache.hadoop.ozone.om.helpers.OmBucketInfo;
@@ -101,7 +102,7 @@ public class PrefixManagerImpl implements PrefixManager {
     validateOzoneObj(obj);
 
     String prefixPath = obj.getPath();
-    metadataManager.getLock().acquireLock(PREFIX_LOCK, prefixPath);
+    metadataManager.getLock().acquireWriteLock(PREFIX_LOCK, prefixPath);
     try {
       OmPrefixInfo prefixInfo =
           metadataManager.getPrefixTable().get(prefixPath);
@@ -117,7 +118,7 @@ public class PrefixManagerImpl implements PrefixManager {
       }
       throw ex;
     } finally {
-      metadataManager.getLock().releaseLock(PREFIX_LOCK, prefixPath);
+      metadataManager.getLock().releaseWriteLock(PREFIX_LOCK, prefixPath);
     }
   }
 
@@ -133,7 +134,7 @@ public class PrefixManagerImpl implements PrefixManager {
   public boolean removeAcl(OzoneObj obj, OzoneAcl acl) throws IOException {
     validateOzoneObj(obj);
     String prefixPath = obj.getPath();
-    metadataManager.getLock().acquireLock(PREFIX_LOCK, prefixPath);
+    metadataManager.getLock().acquireWriteLock(PREFIX_LOCK, prefixPath);
     try {
       OmPrefixInfo prefixInfo =
           metadataManager.getPrefixTable().get(prefixPath);
@@ -156,7 +157,7 @@ public class PrefixManagerImpl implements PrefixManager {
       }
       throw ex;
     } finally {
-      metadataManager.getLock().releaseLock(PREFIX_LOCK, prefixPath);
+      metadataManager.getLock().releaseWriteLock(PREFIX_LOCK, prefixPath);
     }
   }
 
@@ -172,7 +173,7 @@ public class PrefixManagerImpl implements PrefixManager {
   public boolean setAcl(OzoneObj obj, List<OzoneAcl> acls) throws IOException {
     validateOzoneObj(obj);
     String prefixPath = obj.getPath();
-    metadataManager.getLock().acquireLock(PREFIX_LOCK, prefixPath);
+    metadataManager.getLock().acquireWriteLock(PREFIX_LOCK, prefixPath);
     try {
       OmPrefixInfo prefixInfo =
           metadataManager.getPrefixTable().get(prefixPath);
@@ -188,7 +189,7 @@ public class PrefixManagerImpl implements PrefixManager {
       }
       throw ex;
     } finally {
-      metadataManager.getLock().releaseLock(PREFIX_LOCK, prefixPath);
+      metadataManager.getLock().releaseWriteLock(PREFIX_LOCK, prefixPath);
     }
   }
 
@@ -202,7 +203,7 @@ public class PrefixManagerImpl implements PrefixManager {
   public List<OzoneAcl> getAcl(OzoneObj obj) throws IOException {
     validateOzoneObj(obj);
     String prefixPath = obj.getPath();
-    metadataManager.getLock().acquireLock(PREFIX_LOCK, prefixPath);
+    metadataManager.getLock().acquireReadLock(PREFIX_LOCK, prefixPath);
     try {
       String longestPrefix = prefixTree.getLongestPrefix(prefixPath);
       if (prefixPath.equals(longestPrefix)) {
@@ -213,7 +214,7 @@ public class PrefixManagerImpl implements PrefixManager {
         }
       }
     } finally {
-      metadataManager.getLock().releaseLock(PREFIX_LOCK, prefixPath);
+      metadataManager.getLock().releaseReadLock(PREFIX_LOCK, prefixPath);
     }
     return EMPTY_ACL_LIST;
   }
@@ -232,7 +233,7 @@ public class PrefixManagerImpl implements PrefixManager {
     Objects.requireNonNull(context);
 
     String prefixPath = ozObject.getPath();
-    metadataManager.getLock().acquireLock(PREFIX_LOCK, prefixPath);
+    metadataManager.getLock().acquireReadLock(PREFIX_LOCK, prefixPath);
     try {
       String longestPrefix = prefixTree.getLongestPrefix(prefixPath);
       if (prefixPath.equals(longestPrefix)) {
@@ -246,25 +247,22 @@ public class PrefixManagerImpl implements PrefixManager {
                 context.getClientUgi(), ozObject, hasAccess);
           }
           return hasAccess;
-        } else {
-          return true;
         }
-      } else {
-        return true;
       }
     } finally {
-      metadataManager.getLock().releaseLock(PREFIX_LOCK, prefixPath);
+      metadataManager.getLock().releaseReadLock(PREFIX_LOCK, prefixPath);
     }
+    return true;
   }
 
   @Override
   public List<OmPrefixInfo> getLongestPrefixPath(String path) {
     String prefixPath = prefixTree.getLongestPrefix(path);
-    metadataManager.getLock().acquireLock(PREFIX_LOCK, prefixPath);
+    metadataManager.getLock().acquireReadLock(PREFIX_LOCK, prefixPath);
     try {
       return getLongestPrefixPathHelper(prefixPath);
     } finally {
-      metadataManager.getLock().releaseLock(PREFIX_LOCK, prefixPath);
+      metadataManager.getLock().releaseReadLock(PREFIX_LOCK, prefixPath);
     }
   }
 
@@ -310,19 +308,28 @@ public class PrefixManagerImpl implements PrefixManager {
 
   public OMPrefixAclOpResult addAcl(OzoneObj ozoneObj, OzoneAcl ozoneAcl,
       OmPrefixInfo prefixInfo, long transactionLogIndex) throws IOException {
+    // No explicit prefix create API, both add/set Acl can get new prefix
+    // created. When new prefix is created, it should inherit parent prefix
+    // or bucket default ACLs.
+    boolean newPrefix = false;
     if (prefixInfo == null) {
       OmPrefixInfo.Builder prefixInfoBuilder =
           new OmPrefixInfo.Builder()
           .setName(ozoneObj.getPath());
       if (transactionLogIndex > 0) {
-        prefixInfoBuilder.setObjectID(transactionLogIndex);
+        prefixInfoBuilder.setObjectID(OmUtils.getObjectIdFromTxId(
+            metadataManager.getOmEpoch(), transactionLogIndex));
         prefixInfoBuilder.setUpdateID(transactionLogIndex);
       }
       prefixInfo = prefixInfoBuilder.build();
+      newPrefix = true;
     }
 
     boolean changed = prefixInfo.addAcl(ozoneAcl);
     if (changed) {
+      if (newPrefix) {
+        inheritParentAcl(ozoneObj, prefixInfo);
+      }
       // update the in-memory prefix tree
       prefixTree.insert(ozoneObj.getPath(), prefixInfo);
 
@@ -358,6 +365,35 @@ public class PrefixManagerImpl implements PrefixManager {
     return new OMPrefixAclOpResult(prefixInfo, removed);
   }
 
+  private void inheritParentAcl(OzoneObj ozoneObj, OmPrefixInfo prefixInfo)
+      throws IOException {
+    List<OzoneAcl> aclsToBeSet = prefixInfo.getAcls();
+    // Inherit DEFAULT acls from prefix.
+    boolean prefixParentFound = false;
+    List<OmPrefixInfo> prefixList = getLongestPrefixPathHelper(
+        prefixTree.getLongestPrefix(ozoneObj.getPath()));
+
+    if (prefixList.size() > 0) {
+      // Add all acls from direct parent to key.
+      OmPrefixInfo parentPrefixInfo = prefixList.get(prefixList.size() - 1);
+      if (parentPrefixInfo != null) {
+        prefixParentFound = OzoneAclUtil.inheritDefaultAcls(
+            aclsToBeSet, parentPrefixInfo.getAcls());
+      }
+    }
+
+    // If no parent prefix is found inherit DEFAULT acls from bucket.
+    if (!prefixParentFound) {
+      String bucketKey = metadataManager.getBucketKey(ozoneObj
+          .getVolumeName(), ozoneObj.getBucketName());
+      OmBucketInfo bucketInfo = metadataManager.getBucketTable().
+          get(bucketKey);
+      if (bucketInfo != null) {
+        OzoneAclUtil.inheritDefaultAcls(aclsToBeSet, bucketInfo.getAcls());
+      }
+    }
+  }
+
   public OMPrefixAclOpResult setAcl(OzoneObj ozoneObj, List<OzoneAcl> ozoneAcls,
       OmPrefixInfo prefixInfo, long transactionLogIndex) throws IOException {
     if (prefixInfo == null) {
@@ -365,7 +401,8 @@ public class PrefixManagerImpl implements PrefixManager {
           new OmPrefixInfo.Builder()
               .setName(ozoneObj.getPath());
       if (transactionLogIndex > 0) {
-        prefixInfoBuilder.setObjectID(transactionLogIndex);
+        prefixInfoBuilder.setObjectID(OmUtils.getObjectIdFromTxId(
+            metadataManager.getOmEpoch(), transactionLogIndex));
         prefixInfoBuilder.setUpdateID(transactionLogIndex);
       }
       prefixInfo = prefixInfoBuilder.build();
@@ -373,32 +410,7 @@ public class PrefixManagerImpl implements PrefixManager {
 
     boolean changed = prefixInfo.setAcls(ozoneAcls);
     if (changed) {
-      List<OzoneAcl> aclsToBeSet = prefixInfo.getAcls();
-      // Inherit DEFAULT acls from prefix.
-      boolean prefixParentFound = false;
-      List<OmPrefixInfo> prefixList = getLongestPrefixPathHelper(
-          prefixTree.getLongestPrefix(ozoneObj.getPath()));
-
-      if (prefixList.size() > 0) {
-        // Add all acls from direct parent to key.
-        OmPrefixInfo parentPrefixInfo = prefixList.get(prefixList.size() - 1);
-        if (parentPrefixInfo != null) {
-          prefixParentFound = OzoneAclUtil.inheritDefaultAcls(aclsToBeSet,
-              parentPrefixInfo.getAcls());
-        }
-      }
-
-      // If no parent prefix is found inherit DEFAULT acls from bucket.
-      if (!prefixParentFound) {
-        String bucketKey = metadataManager.getBucketKey(ozoneObj
-            .getVolumeName(), ozoneObj.getBucketName());
-        OmBucketInfo bucketInfo = metadataManager.getBucketTable().
-            get(bucketKey);
-        if (bucketInfo != null) {
-          OzoneAclUtil.inheritDefaultAcls(aclsToBeSet, bucketInfo.getAcls());
-        }
-      }
-
+      inheritParentAcl(ozoneObj, prefixInfo);
       prefixTree.insert(ozoneObj.getPath(), prefixInfo);
       if (!isRatisEnabled) {
         metadataManager.getPrefixTable().put(ozoneObj.getPath(), prefixInfo);

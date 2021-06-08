@@ -51,7 +51,6 @@ import org.apache.hadoop.hdds.tracing.GrpcClientInterceptor;
 import org.apache.hadoop.hdds.tracing.TracingUtil;
 import org.apache.hadoop.ozone.OzoneConfigKeys;
 import org.apache.hadoop.ozone.OzoneConsts;
-import org.apache.hadoop.util.Time;
 import java.util.concurrent.TimeoutException;
 
 import com.google.common.annotations.VisibleForTesting;
@@ -83,7 +82,7 @@ public class XceiverClientGrpc extends XceiverClientSpi {
   private final long timeout;
   private SecurityConfig secConfig;
   private final boolean topologyAwareRead;
-  private X509Certificate caCert;
+  private List<X509Certificate> caCerts;
   // Cache the DN which returned the GetBlock command so that the ReadChunk
   // command can be sent to the same DN.
   private Map<DatanodeBlockID, DatanodeDetails> getBlockDNcache;
@@ -94,10 +93,10 @@ public class XceiverClientGrpc extends XceiverClientSpi {
    *
    * @param pipeline - Pipeline that defines the machines.
    * @param config   -- Ozone Config
-   * @param caCert   - SCM ca certificate.
+   * @param caCerts   - SCM ca certificate.
    */
   public XceiverClientGrpc(Pipeline pipeline, ConfigurationSource config,
-      X509Certificate caCert) {
+      List<X509Certificate> caCerts) {
     super();
     Preconditions.checkNotNull(pipeline);
     Preconditions.checkNotNull(config);
@@ -115,7 +114,7 @@ public class XceiverClientGrpc extends XceiverClientSpi {
     this.topologyAwareRead = config.getBoolean(
         OzoneConfigKeys.OZONE_NETWORK_TOPOLOGY_AWARE_READ_KEY,
         OzoneConfigKeys.OZONE_NETWORK_TOPOLOGY_AWARE_READ_DEFAULT);
-    this.caCert = caCert;
+    this.caCerts = caCerts;
     this.getBlockDNcache = new ConcurrentHashMap<>();
   }
 
@@ -180,8 +179,8 @@ public class XceiverClientGrpc extends XceiverClientSpi {
             .intercept(new GrpcClientInterceptor());
     if (secConfig.isGrpcTlsEnabled()) {
       SslContextBuilder sslContextBuilder = GrpcSslContexts.forClient();
-      if (caCert != null) {
-        sslContextBuilder.trustManager(caCert);
+      if (caCerts != null) {
+        sslContextBuilder.trustManager(caCerts);
       }
       if (secConfig.useTestCert()) {
         channelBuilder.overrideAuthority("localhost");
@@ -249,6 +248,36 @@ public class XceiverClientGrpc extends XceiverClientSpi {
   }
 
   @Override
+  public Map<DatanodeDetails, ContainerCommandResponseProto>
+      sendCommandOnAllNodes(
+      ContainerCommandRequestProto request) throws IOException {
+    HashMap<DatanodeDetails, ContainerCommandResponseProto>
+            responseProtoHashMap = new HashMap<>();
+    List<DatanodeDetails> datanodeList = pipeline.getNodes();
+    HashMap<DatanodeDetails, CompletableFuture<ContainerCommandResponseProto>>
+            futureHashMap = new HashMap<>();
+    for (DatanodeDetails dn : datanodeList) {
+      try {
+        futureHashMap.put(dn, sendCommandAsync(request, dn).getResponse());
+      } catch (InterruptedException e) {
+        LOG.error("Command execution was interrupted.");
+      }
+    }
+    try{
+      for (Map.Entry<DatanodeDetails,
+              CompletableFuture<ContainerCommandResponseProto> >
+              entry : futureHashMap.entrySet()){
+        responseProtoHashMap.put(entry.getKey(), entry.getValue().get());
+      }
+    } catch (InterruptedException e) {
+      LOG.error("Command execution was interrupted.");
+    } catch (ExecutionException e) {
+      LOG.error("Failed to execute command " + request, e);
+    }
+    return responseProtoHashMap;
+  }
+
+  @Override
   public ContainerCommandResponseProto sendCommand(
       ContainerCommandRequestProto request, List<CheckedBiFunction> validators)
       throws IOException {
@@ -299,7 +328,9 @@ public class XceiverClientGrpc extends XceiverClientSpi {
     List<DatanodeDetails> datanodeList = null;
 
     DatanodeBlockID blockID = null;
-    if (request.getCmdType() == ContainerProtos.Type.ReadChunk) {
+    if (request.getCmdType() == ContainerProtos.Type.GetBlock) {
+      blockID = request.getGetBlock().getBlockID();
+    } else if  (request.getCmdType() == ContainerProtos.Type.ReadChunk) {
       blockID = request.getReadChunk().getBlockID();
     } else if (request.getCmdType() == ContainerProtos.Type.GetSmallFile) {
       blockID = request.getGetSmallFile().getBlock().getBlockID();
@@ -315,15 +346,17 @@ public class XceiverClientGrpc extends XceiverClientSpi {
           // Pull the Cached DN to the top of the DN list
           Collections.swap(datanodeList, 0, getBlockDNCacheIndex);
         }
-      } else if (topologyAwareRead) {
-        datanodeList = pipeline.getNodesInOrder();
       }
     }
     if (datanodeList == null) {
-      datanodeList = pipeline.getNodes();
-      // Shuffle datanode list so that clients do not read in the same order
-      // every time.
-      Collections.shuffle(datanodeList);
+      if (topologyAwareRead) {
+        datanodeList = pipeline.getNodesInOrder();
+      } else {
+        datanodeList = pipeline.getNodes();
+        // Shuffle datanode list so that clients do not read in the same order
+        // every time.
+        Collections.shuffle(datanodeList);
+      }
     }
 
     for (DatanodeDetails dn : datanodeList) {
@@ -349,9 +382,11 @@ public class XceiverClientGrpc extends XceiverClientSpi {
       } catch (IOException e) {
         ioException = e;
         responseProto = null;
+        LOG.debug("Failed to execute command {} on datanode {}",
+            request, dn, e);
       } catch (ExecutionException e) {
         LOG.debug("Failed to execute command {} on datanode {}",
-            request, dn.getUuid(), e);
+            request, dn, e);
         if (Status.fromThrowable(e.getCause()).getCode()
             == Status.UNAUTHENTICATED.getCode()) {
           throw new SCMSecurityException("Failed to authenticate with "
@@ -422,19 +457,20 @@ public class XceiverClientGrpc extends XceiverClientSpi {
     }
   }
 
-  private XceiverClientReply sendCommandAsync(
+  @VisibleForTesting
+  public XceiverClientReply sendCommandAsync(
       ContainerCommandRequestProto request, DatanodeDetails dn)
       throws IOException, InterruptedException {
     checkOpen(dn, request.getEncodedToken());
     UUID dnId = dn.getUuid();
     if (LOG.isDebugEnabled()) {
       LOG.debug("Send command {} to datanode {}",
-          request.getCmdType(), dn.getNetworkFullPath());
+          request.getCmdType(), dn.getIpAddress());
     }
     final CompletableFuture<ContainerCommandResponseProto> replyFuture =
         new CompletableFuture<>();
     semaphore.acquire();
-    long requestTime = Time.monotonicNowNanos();
+    long requestTime = System.currentTimeMillis();
     metrics.incrPendingContainerOpsMetrics(request.getCmdType());
     // create a new grpc stream for each non-async call.
 
@@ -448,8 +484,14 @@ public class XceiverClientGrpc extends XceiverClientSpi {
               public void onNext(ContainerCommandResponseProto value) {
                 replyFuture.complete(value);
                 metrics.decrPendingContainerOpsMetrics(request.getCmdType());
+                long cost = System.currentTimeMillis() - requestTime;
                 metrics.addContainerOpsLatency(request.getCmdType(),
-                    Time.monotonicNowNanos() - requestTime);
+                    cost);
+                if (LOG.isDebugEnabled()) {
+                  LOG.debug("Executed command {} on datanode {}, cost = {}, "
+                          + "cmdType = {}", request, dn,
+                      cost, request.getCmdType());
+                }
                 semaphore.release();
               }
 
@@ -457,8 +499,14 @@ public class XceiverClientGrpc extends XceiverClientSpi {
               public void onError(Throwable t) {
                 replyFuture.completeExceptionally(t);
                 metrics.decrPendingContainerOpsMetrics(request.getCmdType());
+                long cost = System.currentTimeMillis() - requestTime;
                 metrics.addContainerOpsLatency(request.getCmdType(),
-                    Time.monotonicNowNanos() - requestTime);
+                    System.currentTimeMillis() - requestTime);
+                if (LOG.isDebugEnabled()) {
+                  LOG.debug("Executed command {} on datanode {}, cost = {}, "
+                          + "cmdType = {}", request, dn,
+                      cost, request.getCmdType());
+                }
                 semaphore.release();
               }
 
@@ -513,6 +561,7 @@ public class XceiverClientGrpc extends XceiverClientSpi {
     return null;
   }
 
+  @Override
   public long getReplicatedMinCommitIndex() {
     return 0;
   }
@@ -524,5 +573,10 @@ public class XceiverClientGrpc extends XceiverClientSpi {
   @Override
   public HddsProtos.ReplicationType getPipelineType() {
     return HddsProtos.ReplicationType.STAND_ALONE;
+  }
+
+  @VisibleForTesting
+  public static Logger getLogger() {
+    return LOG;
   }
 }

@@ -21,6 +21,7 @@ import org.apache.hadoop.hdds.scm.pipeline.Pipeline;
 import org.apache.hadoop.hdds.scm.pipeline.UnknownPipelineStateException;
 import org.apache.hadoop.hdds.security.token.OzoneBlockTokenIdentifier;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.KeyLocation;
+import org.apache.hadoop.ozone.protocolPB.OzonePBHelper;
 import org.apache.hadoop.security.token.Token;
 
 import java.util.Objects;
@@ -41,21 +42,26 @@ public final class OmKeyLocationInfo {
 
   private Pipeline pipeline;
 
+  // PartNumber is set for Multipart upload Keys.
+  private int partNumber = -1;
+
   private OmKeyLocationInfo(BlockID blockID, Pipeline pipeline, long length,
-                            long offset) {
+                            long offset, int partNumber) {
     this.blockID = blockID;
     this.pipeline = pipeline;
     this.length = length;
     this.offset = offset;
+    this.partNumber = partNumber;
   }
 
   private OmKeyLocationInfo(BlockID blockID, Pipeline pipeline, long length,
-      long offset, Token<OzoneBlockTokenIdentifier> token) {
+      long offset, Token<OzoneBlockTokenIdentifier> token, int partNumber) {
     this.blockID = blockID;
     this.pipeline = pipeline;
     this.length = length;
     this.offset = offset;
     this.token = token;
+    this.partNumber = partNumber;
   }
 
   public void setCreateVersion(long version) {
@@ -110,6 +116,14 @@ public final class OmKeyLocationInfo {
     this.pipeline = pipeline;
   }
 
+  public void setPartNumber(int partNumber) {
+    this.partNumber = partNumber;
+  }
+
+  public int getPartNumber() {
+    return partNumber;
+  }
+
   /**
    * Builder of OmKeyLocationInfo.
    */
@@ -119,6 +133,7 @@ public final class OmKeyLocationInfo {
     private long offset;
     private Token<OzoneBlockTokenIdentifier> token;
     private Pipeline pipeline;
+    private int partNumber;
 
     public Builder setBlockID(BlockID blockId) {
       this.blockID = blockId;
@@ -146,28 +161,36 @@ public final class OmKeyLocationInfo {
       return this;
     }
 
+    public Builder setPartNumber(int partNum) {
+      this.partNumber = partNum;
+      return this;
+    }
+
     public OmKeyLocationInfo build() {
-      if (token == null) {
-        return new OmKeyLocationInfo(blockID, pipeline, length, offset);
-      } else {
-        return new OmKeyLocationInfo(blockID, pipeline, length, offset, token);
-      }
+      return new OmKeyLocationInfo(blockID, pipeline, length, offset, token,
+          partNumber);
     }
   }
 
-  public KeyLocation getProtobuf() {
+  public KeyLocation getProtobuf(int clientVersion) {
+    return getProtobuf(false, clientVersion);
+  }
+
+  public KeyLocation getProtobuf(boolean ignorePipeline, int clientVersion) {
     KeyLocation.Builder builder = KeyLocation.newBuilder()
         .setBlockID(blockID.getProtobuf())
         .setLength(length)
         .setOffset(offset)
-        .setCreateVersion(createVersion);
+        .setCreateVersion(createVersion).setPartNumber(partNumber);
     if (this.token != null) {
-      builder.setToken(this.token.toTokenProto());
+      builder.setToken(OzonePBHelper.protoFromToken(token));
     }
-    try {
-      builder.setPipeline(pipeline.getProtobufMessage());
-    } catch (UnknownPipelineStateException e) {
-      //TODO: fix me: we should not return KeyLocation without pipeline.
+    if (!ignorePipeline) {
+      try {
+        builder.setPipeline(pipeline.getProtobufMessage(clientVersion));
+      } catch (UnknownPipelineStateException e) {
+        //TODO: fix me: we should not return KeyLocation without pipeline.
+      }
     }
     return builder.build();
   }
@@ -186,23 +209,25 @@ public final class OmKeyLocationInfo {
         BlockID.getFromProtobuf(keyLocation.getBlockID()),
         getPipeline(keyLocation),
         keyLocation.getLength(),
-        keyLocation.getOffset());
+        keyLocation.getOffset(), keyLocation.getPartNumber());
     if(keyLocation.hasToken()) {
-      info.token =  new Token<>(keyLocation.getToken());
+      info.token = (Token<OzoneBlockTokenIdentifier>)
+              OzonePBHelper.tokenFromProto(keyLocation.getToken());
     }
     info.setCreateVersion(keyLocation.getCreateVersion());
     return info;
   }
 
   @Override
-  public String toString() {
+  public String  toString() {
     return "{blockID={containerID=" + blockID.getContainerID() +
         ", localID=" + blockID.getLocalID() + "}" +
         ", length=" + length +
         ", offset=" + offset +
         ", token=" + token +
         ", pipeline=" + pipeline +
-        ", createVersion=" + createVersion + '}';
+        ", createVersion=" + createVersion  + ", partNumber=" + partNumber
+        + '}';
   }
 
   @Override

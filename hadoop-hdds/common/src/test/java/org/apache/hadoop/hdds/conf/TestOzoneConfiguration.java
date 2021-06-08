@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -19,8 +19,10 @@ package org.apache.hadoop.hdds.conf;
 
 import java.io.BufferedWriter;
 import java.io.File;
-import java.io.FileWriter;
+import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.OutputStreamWriter;
+import java.nio.charset.StandardCharsets;
 import java.util.concurrent.TimeUnit;
 
 import org.apache.hadoop.fs.Path;
@@ -61,7 +63,9 @@ public class TestOzoneConfiguration {
   public void testGetAllPropertiesByTags() throws Exception {
     File coreDefault = tempConfigs.newFile("core-default-test.xml");
     File coreSite = tempConfigs.newFile("core-site-test.xml");
-    try (BufferedWriter out = new BufferedWriter(new FileWriter(coreDefault))) {
+    FileOutputStream coreDefaultStream = new FileOutputStream(coreDefault);
+    try (BufferedWriter out = new BufferedWriter(new OutputStreamWriter(
+        coreDefaultStream, StandardCharsets.UTF_8))) {
       startConfig(out);
       appendProperty(out, "hadoop.tags.system", "YARN,HDFS,NAMENODE");
       appendProperty(out, "hadoop.tags.custom", "MYCUSTOMTAG");
@@ -74,11 +78,13 @@ public class TestOzoneConfiguration {
 
       Path fileResource = new Path(coreDefault.getAbsolutePath());
       conf.addResource(fileResource);
-      Assert.assertEquals(conf.getAllPropertiesByTag("MYCUSTOMTAG")
-          .getProperty("dfs.random.key"), "XYZ");
+      Assert.assertEquals("XYZ", conf.getAllPropertiesByTag("MYCUSTOMTAG")
+          .getProperty("dfs.random.key"));
     }
 
-    try (BufferedWriter out = new BufferedWriter(new FileWriter(coreSite))) {
+    FileOutputStream coreSiteStream = new FileOutputStream(coreSite);
+    try (BufferedWriter out = new BufferedWriter(new OutputStreamWriter(
+        coreSiteStream, StandardCharsets.UTF_8))) {
       startConfig(out);
       appendProperty(out, "dfs.random.key", "ABC");
       appendProperty(out, "dfs.replication", "3");
@@ -106,15 +112,17 @@ public class TestOzoneConfiguration {
     ozoneConfig.setBoolean("test.scm.client.enabled", true);
     ozoneConfig.setInt("test.scm.client.port", 5555);
     ozoneConfig.setTimeDuration("test.scm.client.wait", 10, TimeUnit.MINUTES);
+    ozoneConfig.set("test.scm.client.class", Integer.class.getName());
 
     SimpleConfiguration configuration =
         ozoneConfig.getObject(SimpleConfiguration.class);
 
     Assert.assertEquals("host", configuration.getBindHost());
     Assert.assertEquals("address", configuration.getClientAddress());
-    Assert.assertEquals(true, configuration.isEnabled());
+    Assert.assertTrue(configuration.isEnabled());
     Assert.assertEquals(5555, configuration.getPort());
     Assert.assertEquals(600, configuration.getWaitTime());
+    Assert.assertEquals(Integer.class, configuration.getMyClass());
   }
 
   @Test
@@ -124,8 +132,84 @@ public class TestOzoneConfiguration {
     SimpleConfiguration configuration =
         ozoneConfiguration.getObject(SimpleConfiguration.class);
 
-    Assert.assertEquals(true, configuration.isEnabled());
+    Assert.assertTrue(configuration.isEnabled());
     Assert.assertEquals(9878, configuration.getPort());
+    Assert.assertEquals(Object.class, configuration.getMyClass());
+  }
+
+  @Test
+  public void setConfigFromObject() {
+    // GIVEN
+    SimpleConfiguration object = new SimpleConfiguration();
+    object.setBindHost("host");
+    object.setClientAddress("address");
+    object.setEnabled(true);
+    object.setPort(5555);
+    object.setWaitTime(600);
+    object.setMyClass(this.getClass());
+
+    OzoneConfiguration subject = new OzoneConfiguration();
+
+    // WHEN
+    subject.setFromObject(object);
+
+    // THEN
+    Assert.assertEquals(object.getBindHost(),
+        subject.get("test.scm.client.bind.host"));
+    Assert.assertEquals(object.getClientAddress(),
+        subject.get("test.scm.client.address"));
+    Assert.assertEquals(object.isEnabled(),
+        subject.getBoolean("test.scm.client.enabled", false));
+    Assert.assertEquals(object.getPort(),
+        subject.getInt("test.scm.client.port", 0));
+    Assert.assertEquals(TimeUnit.SECONDS.toMinutes(object.getWaitTime()),
+        subject.getTimeDuration("test.scm.client.wait", 0, TimeUnit.MINUTES));
+    Assert.assertEquals(this.getClass(),
+        subject.getClass("test.scm.client.class", null));
+  }
+
+  @Test
+  public void setConfigFromObjectWithConfigDefaults() {
+    // GIVEN
+    OzoneConfiguration subject = new OzoneConfiguration();
+    SimpleConfiguration object = subject.getObject(SimpleConfiguration.class);
+
+    // WHEN
+    subject.setFromObject(object);
+
+    // THEN
+    Assert.assertEquals("0.0.0.0",
+        subject.get("test.scm.client.bind.host"));
+    Assert.assertEquals("localhost",
+        subject.get("test.scm.client.address"));
+    Assert.assertTrue(
+        subject.getBoolean("test.scm.client.enabled", false));
+    Assert.assertEquals(9878,
+        subject.getInt("test.scm.client.port", 123));
+    Assert.assertEquals(TimeUnit.MINUTES.toSeconds(30),
+        subject.getTimeDuration("test.scm.client.wait", 555, TimeUnit.SECONDS));
+  }
+
+  @Test
+  public void setConfigFromObjectWithObjectDefaults() {
+    // GIVEN
+    SimpleConfiguration object = new SimpleConfiguration();
+    OzoneConfiguration subject = new OzoneConfiguration();
+
+    // WHEN
+    subject.setFromObject(object);
+
+    // THEN
+    Assert.assertEquals("0.0.0.0",
+        subject.get("test.scm.client.bind.host"));
+    Assert.assertEquals("localhost",
+        subject.get("test.scm.client.address"));
+    Assert.assertFalse(
+        subject.getBoolean("test.scm.client.enabled", false));
+    Assert.assertEquals(0,
+        subject.getInt("test.scm.client.port", 123));
+    Assert.assertEquals(0,
+        subject.getTimeDuration("test.scm.client.wait", 555, TimeUnit.SECONDS));
   }
 
   @Test(expected = NumberFormatException.class)
@@ -133,10 +217,8 @@ public class TestOzoneConfiguration {
     OzoneConfiguration ozoneConfiguration = new OzoneConfiguration();
     ozoneConfiguration.setInt("test.scm.client.port", -3);
 
-    SimpleConfiguration configuration =
-        ozoneConfiguration.getObject(SimpleConfiguration.class);
+    ozoneConfiguration.getObject(SimpleConfiguration.class);
   }
-
 
   private void appendProperty(BufferedWriter out, String name, String val)
       throws IOException {

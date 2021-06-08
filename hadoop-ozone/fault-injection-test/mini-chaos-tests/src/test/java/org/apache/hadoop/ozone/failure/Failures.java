@@ -19,12 +19,15 @@
 package org.apache.hadoop.ozone.failure;
 
 import org.apache.hadoop.hdds.protocol.DatanodeDetails;
+import org.apache.hadoop.hdds.scm.server.StorageContainerManager;
 import org.apache.hadoop.ozone.MiniOzoneChaosCluster;
 import org.apache.hadoop.ozone.om.OzoneManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.Set;
+import java.util.List;
+import java.util.ArrayList;
 
 /**
  * Implementation of all the failures.
@@ -40,6 +43,19 @@ public abstract class Failures {
   public abstract void fail(MiniOzoneChaosCluster cluster);
 
   public abstract void validateFailure(MiniOzoneChaosCluster cluster);
+
+  public static List<Class<? extends Failures>> getClassList() {
+    List<Class<? extends Failures>> classList = new ArrayList<>();
+
+    classList.add(OzoneManagerRestartFailure.class);
+    classList.add(OzoneManagerStartStopFailure.class);
+    classList.add(DatanodeRestartFailure.class);
+    classList.add(DatanodeStartStopFailure.class);
+    classList.add(StorageContainerManagerStartStopFailure.class);
+    classList.add(StorageContainerManagerRestartFailure.class);
+
+    return classList;
+  }
 
   /**
    * Ozone Manager failures.
@@ -59,6 +75,7 @@ public abstract class Failures {
    * Restart Ozone Manager to induce failure.
    */
   public static class OzoneManagerRestartFailure extends OzoneFailures {
+    @Override
     public void fail(MiniOzoneChaosCluster cluster) {
       boolean failureMode = FailureManager.isFastRestart();
       Set<OzoneManager> oms = cluster.omToFail();
@@ -78,9 +95,10 @@ public abstract class Failures {
    * Start/Stop Ozone Manager to induce failure.
    */
   public static class OzoneManagerStartStopFailure extends OzoneFailures {
+    @Override
     public void fail(MiniOzoneChaosCluster cluster) {
       // Get the number of OzoneManager to fail in the cluster.
-      boolean shouldStop = cluster.shouldStop();
+      boolean shouldStop = cluster.shouldStopOm();
       Set<OzoneManager> oms = cluster.omToFail();
       oms.parallelStream().forEach(om -> {
         try {
@@ -92,6 +110,66 @@ public abstract class Failures {
           }
         } catch (Throwable t) {
           LOG.error("Failed to shutdown OM {}", om, t);
+        }
+      });
+    }
+  }
+
+  /**
+   * Ozone Manager failures.
+   */
+  public abstract static class ScmFailures extends Failures {
+    @Override
+    public void validateFailure(MiniOzoneChaosCluster cluster) {
+      if (cluster.getStorageContainerManagersList().size() < 3) {
+        throw new IllegalArgumentException("Not enough number of " +
+            "StorageContainerManagers to test chaos on" +
+            "StorageContainerManagers. Set number of " +
+            "StorageContainerManagers to at least 3");
+      }
+    }
+  }
+
+  /**
+   * Start/Stop Ozone Manager to induce failure.
+   */
+  public static class StorageContainerManagerStartStopFailure
+      extends ScmFailures {
+    public void fail(MiniOzoneChaosCluster cluster) {
+      // Get the number of OzoneManager to fail in the cluster.
+      boolean shouldStop = cluster.shouldStopScm();
+      Set<StorageContainerManager> scms = cluster.scmToFail();
+      scms.parallelStream().forEach(scm -> {
+        try {
+          if (shouldStop) {
+            // start another OM before failing the next one.
+            cluster.shutdownStorageContainerManager(scm);
+          } else {
+            cluster.restartStorageContainerManager(scm, true);
+          }
+        } catch (Throwable t) {
+          LOG.error("Failed to shutdown OM {}", scm, t);
+        }
+      });
+    }
+  }
+
+  /**
+   * Start/Stop Ozone Manager to induce failure.
+   */
+  public static class StorageContainerManagerRestartFailure
+      extends ScmFailures {
+    @Override
+    public void fail(MiniOzoneChaosCluster cluster) {
+      boolean failureMode = FailureManager.isFastRestart();
+      Set<StorageContainerManager> scms = cluster.scmToFail();
+      scms.parallelStream().forEach(scm -> {
+        try {
+          cluster.shutdownStorageContainerManager(scm);
+          cluster.restartStorageContainerManager(scm, failureMode);
+          cluster.waitForClusterToBeReady();
+        } catch (Throwable t) {
+          LOG.error("Failed to restartNodes SCM {}", scm, t);
         }
       });
     }
@@ -111,6 +189,7 @@ public abstract class Failures {
    * Restart Datanodes to induce failure.
    */
   public static class DatanodeRestartFailure extends DatanodeFailures {
+    @Override
     public void fail(MiniOzoneChaosCluster cluster) {
       boolean failureMode = FailureManager.isFastRestart();
       Set<DatanodeDetails> dns = cluster.dnToFail();
@@ -128,6 +207,7 @@ public abstract class Failures {
    * Start/Stop Datanodes to induce failure.
    */
   public static class DatanodeStartStopFailure extends DatanodeFailures {
+    @Override
     public void fail(MiniOzoneChaosCluster cluster) {
       // Get the number of datanodes to fail in the cluster.
       Set<DatanodeDetails> dns = cluster.dnToFail();

@@ -18,17 +18,22 @@
 
 package org.apache.hadoop.ozone.container.replication;
 
+import java.io.IOException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
-import java.util.function.Function;
 
 import org.apache.hadoop.hdds.conf.ConfigurationSource;
 import org.apache.hadoop.hdds.protocol.DatanodeDetails;
 import org.apache.hadoop.hdds.protocol.DatanodeDetails.Port.Name;
+import org.apache.hadoop.hdds.security.x509.SecurityConfig;
+import org.apache.hadoop.hdds.security.x509.certificate.client.CertificateClient;
 import org.apache.hadoop.ozone.OzoneConfigKeys;
 
+import com.google.common.annotations.VisibleForTesting;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -45,8 +50,13 @@ public class SimpleContainerDownloader implements ContainerDownloader {
       LoggerFactory.getLogger(SimpleContainerDownloader.class);
 
   private final Path workingDirectory;
+  private final SecurityConfig securityConfig;
+  private final CertificateClient certClient;
 
-  public SimpleContainerDownloader(ConfigurationSource conf) {
+  public SimpleContainerDownloader(
+      ConfigurationSource conf,
+      CertificateClient certClient
+  ) {
 
     String workDirString =
         conf.get(OzoneConfigKeys.OZONE_CONTAINER_COPY_WORKDIR);
@@ -57,42 +67,84 @@ public class SimpleContainerDownloader implements ContainerDownloader {
     } else {
       workingDirectory = Paths.get(workDirString);
     }
+    securityConfig = new SecurityConfig(conf);
+    this.certClient = certClient;
   }
 
   @Override
-  public CompletableFuture<Path> getContainerDataFromReplicas(long containerId,
-      List<DatanodeDetails> sourceDatanodes) {
+  public CompletableFuture<Path> getContainerDataFromReplicas(
+      long containerId,
+      List<DatanodeDetails> sourceDatanodes
+  ) {
 
     CompletableFuture<Path> result = null;
-    for (DatanodeDetails datanode : sourceDatanodes) {
-      try {
 
+    final List<DatanodeDetails> shuffledDatanodes =
+        shuffleDatanodes(sourceDatanodes);
+
+    for (DatanodeDetails datanode : shuffledDatanodes) {
+      try {
         if (result == null) {
-          GrpcReplicationClient grpcReplicationClient =
-              new GrpcReplicationClient(datanode.getIpAddress(),
-                  datanode.getPort(Name.STANDALONE).getValue(),
-                  workingDirectory);
-          result = grpcReplicationClient.download(containerId);
+          result = downloadContainer(containerId, datanode);
         } else {
-          result = result.thenApply(CompletableFuture::completedFuture)
-              .exceptionally(t -> {
-                LOG.error("Error on replicating container: " + containerId, t);
-                GrpcReplicationClient grpcReplicationClient =
-                    new GrpcReplicationClient(datanode.getIpAddress(),
-                        datanode.getPort(Name.STANDALONE).getValue(),
-                        workingDirectory);
-                return grpcReplicationClient.download(containerId);
-              }).thenCompose(Function.identity());
+
+          result = result.exceptionally(t -> {
+            LOG.error("Error on replicating container: " + containerId, t);
+            try {
+              return downloadContainer(containerId, datanode).join();
+            } catch (Exception e) {
+              LOG.error("Error on replicating container: " + containerId,
+                  e);
+              return null;
+            }
+          });
         }
       } catch (Exception ex) {
         LOG.error(String.format(
             "Container %s download from datanode %s was unsuccessful. "
                 + "Trying the next datanode", containerId, datanode), ex);
       }
-
     }
     return result;
 
+  }
+
+  //There is a chance for the download is successful but import is failed,
+  //due to data corruption. We need a random selected datanode to have a
+  //chance to succeed next time.
+  protected List<DatanodeDetails> shuffleDatanodes(
+      List<DatanodeDetails> sourceDatanodes
+  ) {
+
+    final ArrayList<DatanodeDetails> shuffledDatanodes =
+        new ArrayList<>(sourceDatanodes);
+
+    Collections.shuffle(shuffledDatanodes);
+
+    return shuffledDatanodes;
+  }
+
+  @VisibleForTesting
+  protected CompletableFuture<Path> downloadContainer(
+      long containerId,
+      DatanodeDetails datanode
+  ) throws IOException {
+    CompletableFuture<Path> result;
+    GrpcReplicationClient grpcReplicationClient =
+        new GrpcReplicationClient(datanode.getIpAddress(),
+            datanode.getPort(Name.REPLICATION).getValue(),
+            workingDirectory, securityConfig, certClient);
+    result = grpcReplicationClient.download(containerId)
+        .thenApply(r -> {
+          try {
+            grpcReplicationClient.close();
+          } catch (Exception e) {
+            LOG.error("Couldn't close Grpc replication client", e);
+          }
+          return r;
+        });
+
+    return result;
   }
 
   @Override

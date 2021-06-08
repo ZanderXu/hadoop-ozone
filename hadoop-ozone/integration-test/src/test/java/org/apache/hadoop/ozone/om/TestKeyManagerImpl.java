@@ -23,6 +23,7 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.BitSet;
 import java.util.Collections;
 import java.util.HashMap;
@@ -36,6 +37,9 @@ import java.util.UUID;
 import org.apache.hadoop.conf.StorageUnit;
 import org.apache.hadoop.hdds.HddsConfigKeys;
 import org.apache.hadoop.hdds.client.BlockID;
+import org.apache.hadoop.hdds.client.RatisReplicationConfig;
+import org.apache.hadoop.hdds.client.ReplicationConfig;
+import org.apache.hadoop.hdds.client.StandaloneReplicationConfig;
 import org.apache.hadoop.hdds.conf.OzoneConfiguration;
 import org.apache.hadoop.hdds.protocol.DatanodeDetails;
 import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
@@ -48,6 +52,8 @@ import org.apache.hadoop.hdds.scm.container.common.helpers.ContainerWithPipeline
 import org.apache.hadoop.hdds.scm.container.common.helpers.ExcludeList;
 import org.apache.hadoop.hdds.scm.exceptions.SCMException;
 import org.apache.hadoop.hdds.scm.exceptions.SCMException.ResultCodes;
+import org.apache.hadoop.hdds.scm.ha.MockSCMHAManager;
+import org.apache.hadoop.hdds.scm.ha.SCMContext;
 import org.apache.hadoop.hdds.scm.net.NetworkTopology;
 import org.apache.hadoop.hdds.scm.net.NetworkTopologyImpl;
 import org.apache.hadoop.hdds.scm.net.NodeSchema;
@@ -64,7 +70,6 @@ import org.apache.hadoop.hdds.utils.db.cache.CacheValue;
 import org.apache.hadoop.ozone.MiniOzoneCluster;
 import org.apache.hadoop.ozone.OzoneAcl;
 import org.apache.hadoop.ozone.OzoneConfigKeys;
-import org.apache.hadoop.ozone.OzoneTestUtils;
 import org.apache.hadoop.ozone.om.exceptions.OMException;
 import org.apache.hadoop.ozone.om.helpers.OmBucketInfo;
 import org.apache.hadoop.ozone.om.helpers.OmKeyArgs;
@@ -85,14 +90,17 @@ import org.apache.hadoop.ozone.security.acl.OzoneObj;
 import org.apache.hadoop.ozone.security.acl.OzoneObjInfo;
 import org.apache.hadoop.ozone.security.acl.RequestContext;
 import org.apache.hadoop.security.UserGroupInformation;
-import org.apache.hadoop.test.GenericTestUtils;
-import org.apache.hadoop.test.LambdaTestUtils;
+import org.apache.ozone.test.GenericTestUtils;
+import org.apache.ozone.test.LambdaTestUtils;
 import org.apache.hadoop.util.Time;
 
 import com.google.common.base.Optional;
 import com.google.common.collect.Sets;
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.lang3.RandomStringUtils;
+
+import static org.apache.hadoop.hdds.protocol.proto.HddsProtos.ReplicationFactor.ONE;
+import static org.apache.hadoop.hdds.protocol.proto.HddsProtos.ReplicationFactor.THREE;
 import static org.apache.hadoop.hdds.scm.net.NetConstants.LEAF_SCHEMA;
 import static org.apache.hadoop.hdds.scm.net.NetConstants.RACK_SCHEMA;
 import static org.apache.hadoop.hdds.scm.net.NetConstants.ROOT_SCHEMA;
@@ -108,7 +116,6 @@ import org.junit.AfterClass;
 import org.junit.Assert;
 import org.junit.Assume;
 import org.junit.BeforeClass;
-import org.junit.Ignore;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.ExpectedException;
@@ -130,13 +137,14 @@ public class TestKeyManagerImpl {
     * Set a timeout for each test.
     */
   @Rule
-  public Timeout timeout = new Timeout(300000);
+  public Timeout timeout = Timeout.seconds(300);
 
   private static PrefixManager prefixManager;
   private static KeyManagerImpl keyManager;
   private static NodeManager nodeManager;
   private static StorageContainerManager scm;
   private static ScmBlockLocationProtocol mockScmBlockLocationProtocol;
+  private static StorageContainerLocationProtocol mockScmContainerClient;
   private static OzoneConfiguration conf;
   private static OMMetadataManager metadataManager;
   private static File dir;
@@ -170,6 +178,8 @@ public class TestKeyManagerImpl {
     SCMConfigurator configurator = new SCMConfigurator();
     configurator.setScmNodeManager(nodeManager);
     configurator.setNetworkTopology(clusterMap);
+    configurator.setSCMHAManager(MockSCMHAManager.getInstance(true));
+    configurator.setScmContext(SCMContext.emptyContext());
     scm = TestUtils.getScm(conf, configurator);
     scm.start();
     scm.exitSafeMode();
@@ -178,17 +188,19 @@ public class TestKeyManagerImpl {
             StorageUnit.BYTES);
     conf.setLong(OZONE_KEY_PREALLOCATION_BLOCKS_MAX, 10);
 
+    mockScmContainerClient =
+        Mockito.mock(StorageContainerLocationProtocol.class);
     keyManager =
-        new KeyManagerImpl(scm.getBlockProtocolServer(), metadataManager, conf,
-            "om1", null);
+        new KeyManagerImpl(scm.getBlockProtocolServer(),
+            mockScmContainerClient, metadataManager, conf, "om1", null);
     prefixManager = new PrefixManagerImpl(metadataManager, false);
 
     Mockito.when(mockScmBlockLocationProtocol
         .allocateBlock(Mockito.anyLong(), Mockito.anyInt(),
-            Mockito.any(ReplicationType.class),
-            Mockito.any(ReplicationFactor.class), Mockito.anyString(),
+            Mockito.any(ReplicationConfig.class),
+            Mockito.anyString(),
             Mockito.any(ExcludeList.class))).thenThrow(
-        new SCMException("SafeModePrecheck failed for allocateBlock",
+                new SCMException("SafeModePrecheck failed for allocateBlock",
             ResultCodes.SAFE_MODE_EXCEPTION));
     createVolume(VOLUME_NAME);
     createBucket(VOLUME_NAME, BUCKET_NAME);
@@ -258,8 +270,7 @@ public class TestKeyManagerImpl {
         .setCreationTime(Time.now())
         .setModificationTime(Time.now())
         .setDataSize(0)
-        .setReplicationType(keyArgs.getType())
-        .setReplicationFactor(keyArgs.getFactor())
+        .setReplicationConfig(keyArgs.getReplicationConfig())
         .setFileEncryptionInfo(null).build();
     metadataManager.getOpenKeyTable().put(
         metadataManager.getOpenKey(VOLUME_NAME, BUCKET_NAME, KEY_NAME, 1L),
@@ -279,7 +290,8 @@ public class TestKeyManagerImpl {
     OmKeyArgs keyArgs = createBuilder()
         .setKeyName(KEY_NAME)
         .setDataSize(1000)
-        .setAcls(OzoneAclUtil.getAclList(ugi.getUserName(), ugi.getGroups(),
+        .setReplicationConfig(new RatisReplicationConfig(THREE))
+        .setAcls(OzoneAclUtil.getAclList(ugi.getUserName(), ugi.getGroupNames(),
             ALL, ALL))
         .build();
     LambdaTestUtils.intercept(OMException.class,
@@ -303,13 +315,15 @@ public class TestKeyManagerImpl {
   @Test
   public void testCreateDirectory() throws IOException {
     // Create directory where the parent directory does not exist
-    String keyName = RandomStringUtils.randomAlphabetic(5);
+    StringBuffer keyNameBuf = new StringBuffer();
+    keyNameBuf.append(RandomStringUtils.randomAlphabetic(5));
     OmKeyArgs keyArgs = createBuilder()
-        .setKeyName(keyName)
+        .setKeyName(keyNameBuf.toString())
         .build();
     for (int i =0; i< 5; i++) {
-      keyName += "/" + RandomStringUtils.randomAlphabetic(5);
+      keyNameBuf.append("/").append(RandomStringUtils.randomAlphabetic(5));
     }
+    String keyName = keyNameBuf.toString();
     keyManager.createDirectory(keyArgs);
     Path path = Paths.get(keyName);
     while (path != null) {
@@ -327,9 +341,6 @@ public class TestKeyManagerImpl {
     keyArgs.setLocationInfoList(
         keySession.getKeyInfo().getLatestVersionLocations().getLocationList());
     keyManager.commitKey(keyArgs, keySession.getId());
-    for (int i =0; i< 5; i++) {
-      keyName += "/" + RandomStringUtils.randomAlphabetic(5);
-    }
     try {
       keyManager.createDirectory(keyArgs);
       Assert.fail("Creation should fail for directory.");
@@ -385,10 +396,12 @@ public class TestKeyManagerImpl {
 
     // try to create a file where parent directories do not exist and
     // recursive flag is set to false
-    keyName = RandomStringUtils.randomAlphabetic(5);
+    StringBuffer keyNameBuf = new StringBuffer();
+    keyNameBuf.append(RandomStringUtils.randomAlphabetic(5));
     for (int i =0; i< 5; i++) {
-      keyName += "/" + RandomStringUtils.randomAlphabetic(5);
+      keyNameBuf.append("/").append(RandomStringUtils.randomAlphabetic(5));
     }
+    keyName = keyNameBuf.toString();
     keyArgs = createBuilder()
         .setKeyName(keyName)
         .build();
@@ -424,9 +437,6 @@ public class TestKeyManagerImpl {
   }
 
   @Test
-  @Ignore
-  // TODO this test relies on KeyManagerImpl.createFile which is dead code.
-  // Move the test case out of this file, update the implementation.
   public void testCheckAccessForFileKey() throws Exception {
     OmKeyArgs keyArgs = createBuilder()
         .setKeyName("testdir/deep/NOTICE.txt")
@@ -457,8 +467,8 @@ public class TestKeyManagerImpl {
     OzoneObj nonExistentKey = OzoneObjInfo.Builder.fromKeyArgs(keyArgs)
         .setStoreType(OzoneObj.StoreType.OZONE)
         .build();
-    OzoneTestUtils.expectOmException(OMException.ResultCodes.KEY_NOT_FOUND,
-        () -> keyManager.checkAccess(nonExistentKey, currentUserReads()));
+    Assert.assertTrue(keyManager.checkAccess(nonExistentKey,
+            currentUserReads()));
   }
 
   @Test
@@ -605,7 +615,7 @@ public class TestKeyManagerImpl {
         .setStoreType(OzoneObj.StoreType.OZONE)
         .build();
 
-
+    prefixManager.addAcl(ozPrefix1, ozAcl1);
     List<OzoneAcl> ozAclGet = prefixManager.getAcl(ozPrefix1);
     Assert.assertEquals(1, ozAclGet.size());
     Assert.assertEquals(ozAcl1, ozAclGet.get(0));
@@ -613,8 +623,7 @@ public class TestKeyManagerImpl {
     // get acl with invalid prefix name
     exception.expect(OMException.class);
     exception.expectMessage("Invalid prefix name");
-    ozAclGet = prefixManager.getAcl(ozInvalidPrefix);
-    Assert.assertEquals(null, ozAcl1);
+    prefixManager.getAcl(ozInvalidPrefix);
 
     // set acl with invalid prefix name
     List<OzoneAcl> ozoneAcls = new ArrayList<OzoneAcl>();
@@ -755,14 +764,24 @@ public class TestKeyManagerImpl {
     Assume.assumeFalse(nodeList.get(0).equals(nodeList.get(2)));
     // create a pipeline using 3 datanodes
     Pipeline pipeline = scm.getPipelineManager().createPipeline(
-        ReplicationType.RATIS, ReplicationFactor.THREE, nodeList);
+        new RatisReplicationConfig(ReplicationFactor.THREE), nodeList);
     List<OmKeyLocationInfo> locationInfoList = new ArrayList<>();
+    List<OmKeyLocationInfo> locationList =
+        keySession.getKeyInfo().getLatestVersionLocations().getLocationList();
+    Assert.assertEquals(1, locationList.size());
     locationInfoList.add(
         new OmKeyLocationInfo.Builder().setPipeline(pipeline)
-            .setBlockID(new BlockID(1L, 1L)).build());
+            .setBlockID(new BlockID(locationList.get(0).getContainerID(),
+                locationList.get(0).getLocalID())).build());
     keyArgs.setLocationInfoList(locationInfoList);
 
     keyManager.commitKey(keyArgs, keySession.getId());
+    ContainerInfo containerInfo = new ContainerInfo.Builder().setContainerID(1L)
+        .setPipelineID(pipeline.getId()).build();
+    List<ContainerWithPipeline> containerWithPipelines = Arrays.asList(
+        new ContainerWithPipeline(containerInfo, pipeline));
+    when(mockScmContainerClient.getContainerWithPipelineBatch(
+        Arrays.asList(1L))).thenReturn(containerWithPipelines);
 
     OmKeyInfo key = keyManager.lookupKey(keyArgs, null);
     Assert.assertEquals(key.getKeyName(), keyName);
@@ -811,11 +830,11 @@ public class TestKeyManagerImpl {
         TestOMRequestUtils.addKeyToTable(false,
             VOLUME_NAME, BUCKET_NAME, prefixKeyInDB + i,
             1000L, HddsProtos.ReplicationType.RATIS,
-            HddsProtos.ReplicationFactor.ONE, metadataManager);
+            ONE, metadataManager);
       } else {  // Add to TableCache
         TestOMRequestUtils.addKeyToTableCache(
             VOLUME_NAME, BUCKET_NAME, prefixKeyInCache + i,
-            HddsProtos.ReplicationType.RATIS, HddsProtos.ReplicationFactor.ONE,
+            HddsProtos.ReplicationType.RATIS, ONE,
             metadataManager);
       }
     }
@@ -882,12 +901,12 @@ public class TestKeyManagerImpl {
             VOLUME_NAME, BUCKET_NAME,
             keyNameDir1Subdir1 + OZONE_URI_DELIMITER + prefixKeyInDB + i,
             1000L, HddsProtos.ReplicationType.RATIS,
-            HddsProtos.ReplicationFactor.ONE, metadataManager);
+            ONE, metadataManager);
       } else {  // Add to TableCache
         TestOMRequestUtils.addKeyToTableCache(
             VOLUME_NAME, BUCKET_NAME,
             keyNameDir1Subdir1 + OZONE_URI_DELIMITER + prefixKeyInCache + i,
-            HddsProtos.ReplicationType.RATIS, HddsProtos.ReplicationFactor.ONE,
+            HddsProtos.ReplicationType.RATIS, ONE,
             metadataManager);
       }
     }
@@ -925,12 +944,12 @@ public class TestKeyManagerImpl {
         TestOMRequestUtils.addKeyToTable(false,
             VOLUME_NAME, BUCKET_NAME, prefixKey + i,
             1000L, HddsProtos.ReplicationType.RATIS,
-            HddsProtos.ReplicationFactor.ONE, metadataManager);
+            ONE, metadataManager);
         existKeySet.add(prefixKey + i);
       } else {
         TestOMRequestUtils.addKeyToTableCache(
             VOLUME_NAME, BUCKET_NAME, prefixKey + i,
-            HddsProtos.ReplicationType.RATIS, HddsProtos.ReplicationFactor.ONE,
+            HddsProtos.ReplicationType.RATIS, ONE,
             metadataManager);
 
         String key = metadataManager.getOzoneKey(
@@ -1085,8 +1104,7 @@ public class TestKeyManagerImpl {
         tempFileStatus = keyManager.listStatus(dirArgs, false,
             tempFileStatus != null ?
                 tempFileStatus.get(tempFileStatus.size() - 1).getKeyInfo()
-                    .getKeyName() : null,
-            2);
+                    .getKeyName() : null, 2);
         tmpStatusSet.addAll(tempFileStatus);
       } while (tempFileStatus.size() == 2);
       verifyFileStatus(directory, new ArrayList<>(tmpStatusSet), directorySet,
@@ -1102,9 +1120,7 @@ public class TestKeyManagerImpl {
         tempFileStatus = keyManager.listStatus(dirArgs, true,
             tempFileStatus != null ?
                 tempFileStatus.get(tempFileStatus.size() - 1).getKeyInfo()
-                    .getKeyName() :
-                null,
-            2);
+                    .getKeyName() : null, 2);
         tmpStatusSet.addAll(tempFileStatus);
       } while (tempFileStatus.size() == 2);
       verifyFileStatus(directory, new ArrayList<>(tmpStatusSet), directorySet,
@@ -1179,7 +1195,7 @@ public class TestKeyManagerImpl {
       KeyManagerImpl keyManagerImpl =
           new KeyManagerImpl(ozoneManager, scmClientMock, conf, "om1");
 
-      keyManagerImpl.refreshPipeline(omKeyInfo);
+      keyManagerImpl.refresh(omKeyInfo);
 
       verify(sclProtocolMock, times(1))
           .getContainerWithPipelineBatch(containerIDs);
@@ -1224,7 +1240,7 @@ public class TestKeyManagerImpl {
           new KeyManagerImpl(ozoneManager, scmClientMock, conf, "om1");
 
       try {
-        keyManagerImpl.refreshPipeline(omKeyInfo);
+        keyManagerImpl.refresh(omKeyInfo);
         Assert.fail();
       } catch (OMException omEx) {
         Assert.assertEquals(SCM_GET_PIPELINE_EXCEPTION, omEx.getResult());
@@ -1243,8 +1259,8 @@ public class TestKeyManagerImpl {
     return Pipeline.newBuilder()
         .setState(Pipeline.PipelineState.OPEN)
         .setId(PipelineID.randomId())
-        .setType(ReplicationType.RATIS)
-        .setFactor(ReplicationFactor.THREE)
+        .setReplicationConfig(
+            new RatisReplicationConfig(ReplicationFactor.THREE))
         .setNodes(new ArrayList<>())
         .build();
   }
@@ -1360,10 +1376,10 @@ public class TestKeyManagerImpl {
     UserGroupInformation ugi = UserGroupInformation.getCurrentUser();
     return new OmKeyArgs.Builder()
         .setBucketName(BUCKET_NAME)
-        .setFactor(ReplicationFactor.ONE)
         .setDataSize(0)
-        .setType(ReplicationType.STAND_ALONE)
-        .setAcls(OzoneAclUtil.getAclList(ugi.getUserName(), ugi.getGroups(),
+        .setReplicationConfig(
+            new StandaloneReplicationConfig(ONE))
+        .setAcls(OzoneAclUtil.getAclList(ugi.getUserName(), ugi.getGroupNames(),
             ALL, ALL))
         .setVolumeName(VOLUME_NAME);
   }
@@ -1371,7 +1387,7 @@ public class TestKeyManagerImpl {
   private RequestContext currentUserReads() throws IOException {
     return RequestContext.newBuilder()
         .setClientUgi(UserGroupInformation.getCurrentUser())
-        .setAclRights(ACLType.READ_ACL)
+        .setAclRights(ACLType.READ)
         .setAclType(ACLIdentityType.USER)
         .build();
   }

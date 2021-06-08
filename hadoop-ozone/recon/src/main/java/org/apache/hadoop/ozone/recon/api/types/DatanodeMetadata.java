@@ -18,6 +18,7 @@
 package org.apache.hadoop.ozone.recon.api.types;
 
 import com.google.common.base.Preconditions;
+import org.apache.hadoop.hdds.protocol.proto.HddsProtos.NodeOperationalState;
 import org.apache.hadoop.hdds.protocol.proto.HddsProtos.NodeState;
 
 import javax.xml.bind.annotation.XmlAccessType;
@@ -40,6 +41,9 @@ public final class DatanodeMetadata {
   @XmlElement(name = "state")
   private NodeState state;
 
+  @XmlElement(name = "opState")
+  private NodeOperationalState opState;
+
   @XmlElement(name = "lastHeartbeat")
   private long lastHeartbeat;
 
@@ -55,15 +59,32 @@ public final class DatanodeMetadata {
   @XmlElement(name = "leaderCount")
   private int leaderCount;
 
+  @XmlElement(name = "version")
+  private String version;
+
+  @XmlElement(name = "setupTime")
+  private long setupTime;
+
+  @XmlElement(name = "revision")
+  private String revision;
+
+  @XmlElement(name = "buildDate")
+  private String buildDate;
+
   private DatanodeMetadata(Builder builder) {
     this.hostname = builder.hostname;
     this.uuid = builder.uuid;
     this.state = builder.state;
+    this.opState = builder.opState;
     this.lastHeartbeat = builder.lastHeartbeat;
     this.datanodeStorageReport = builder.datanodeStorageReport;
     this.pipelines = builder.pipelines;
     this.containers = builder.containers;
     this.leaderCount = builder.leaderCount;
+    this.version = builder.version;
+    this.setupTime = builder.setupTime;
+    this.revision = builder.revision;
+    this.buildDate = builder.buildDate;
   }
 
   public String getHostname() {
@@ -72,6 +93,10 @@ public final class DatanodeMetadata {
 
   public NodeState getState() {
     return state;
+  }
+
+  public NodeOperationalState getOperationalState() {
+    return opState;
   }
 
   public long getLastHeartbeat() {
@@ -98,6 +123,22 @@ public final class DatanodeMetadata {
     return uuid;
   }
 
+  public String getVersion() {
+    return version;
+  }
+
+  public long getSetupTime() {
+    return  setupTime;
+  }
+
+  public String getRevision() {
+    return revision;
+  }
+
+  public String getBuildDate() {
+    return buildDate;
+  }
+
   /**
    * Returns new builder class that builds a DatanodeMetadata.
    *
@@ -115,11 +156,16 @@ public final class DatanodeMetadata {
     private String hostname;
     private String uuid;
     private NodeState state;
+    private NodeOperationalState opState;
     private long lastHeartbeat;
     private DatanodeStorageReport datanodeStorageReport;
     private List<DatanodePipeline> pipelines;
     private int containers;
     private int leaderCount;
+    private String version;
+    private long setupTime;
+    private String revision;
+    private String buildDate;
 
     public Builder() {
       this.containers = 0;
@@ -133,6 +179,11 @@ public final class DatanodeMetadata {
 
     public Builder withState(NodeState state) {
       this.state = state;
+      return this;
+    }
+
+    public Builder withOperationalState(NodeOperationalState opState) {
+      this.opState = opState;
       return this;
     }
 
@@ -164,6 +215,26 @@ public final class DatanodeMetadata {
 
     public Builder withUUid(String uuid) {
       this.uuid = uuid;
+      return this;
+    }
+
+    public Builder withVersion(String version) {
+      this.version = version;
+      return this;
+    }
+
+    public Builder withSetupTime(long setupTime) {
+      this.setupTime = setupTime;
+      return this;
+    }
+
+    public Builder withRevision(String revision) {
+      this.revision = revision;
+      return this;
+    }
+
+    public Builder withBuildDate(String buildDate) {
+      this.buildDate = buildDate;
       return this;
     }
 
